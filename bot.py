@@ -93,6 +93,11 @@ def db_init():
         uid INTEGER, ch_id INTEGER, msg_id INTEGER, src TEXT, ts REAL DEFAULT 0);
     CREATE INDEX IF NOT EXISTS idx_fwd_uid ON fwd_log(uid);
     CREATE INDEX IF NOT EXISTS idx_fwd_ts  ON fwd_log(ts);
+    CREATE TABLE IF NOT EXISTS plans(
+        key TEXT PRIMARY KEY,
+        label TEXT, days INTEGER, price INTEGER, enabled INTEGER DEFAULT 1);
+    CREATE TABLE IF NOT EXISTS settings(
+        key TEXT PRIMARY KEY, value TEXT);
     """)
     # Migration — add new columns if not exist
     for col, default in [
@@ -102,13 +107,53 @@ def db_init():
         try:
             c.execute(f"ALTER TABLE channels ADD COLUMN {col} INTEGER DEFAULT {default}")
         except: pass
+    # Insert default plans if not exist
+    defaults = [
+        ("w", "⚡ Weekly",  7,   19,  1),
+        ("m", "🌟 Monthly", 30,  49,  1),
+        ("y", "👑 Yearly",  365, 399, 1),
+    ]
+    for row in defaults:
+        c.execute("INSERT OR IGNORE INTO plans(key,label,days,price,enabled) VALUES(?,?,?,?,?)", row)
+    # Default settings
+    c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('trial_days','7')")
     c.commit(); c.close()
+
+# ── Plans (Dynamic) ────────────────────────────────────────────
+def plan_all():
+    c=DB(); r=c.execute("SELECT * FROM plans ORDER BY days").fetchall(); c.close()
+    return [dict(i) for i in r]
+
+def plan_get(key):
+    c=DB(); r=c.execute("SELECT * FROM plans WHERE key=?",(key,)).fetchone(); c.close()
+    return dict(r) if r else None
+
+def plan_upd(key, **kw):
+    c=DB()
+    for k,v in kw.items(): c.execute(f"UPDATE plans SET {k}=? WHERE key=?",(v,key))
+    c.commit(); c.close()
+
+def plan_add(key, label, days, price):
+    c=DB(); c.execute("INSERT OR REPLACE INTO plans(key,label,days,price,enabled) VALUES(?,?,?,?,1)",(key,label,days,price)); c.commit(); c.close()
+
+def plan_del(key):
+    c=DB(); c.execute("DELETE FROM plans WHERE key=?",(key,)); c.commit(); c.close()
+
+def setting_get(key, default=""):
+    c=DB(); r=c.execute("SELECT value FROM settings WHERE key=?",(key,)).fetchone(); c.close()
+    return r['value'] if r else default
+
+def setting_set(key, value):
+    c=DB(); c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",(key,str(value))); c.commit(); c.close()
+
+def get_trial_days():
+    return int(setting_get('trial_days', '7'))
 
 # ── Users ──────────────────────────────────────────────────────
 def u_upsert(uid, un="", nm=""):
     c=DB(); r=c.execute("SELECT uid FROM users WHERE uid=?",(uid,)).fetchone()
     new=r is None; now=time.time()
-    if new: c.execute("INSERT INTO users(uid,uname,name,sub_end,joined) VALUES(?,?,?,?,?)",(uid,un,nm,now+TRIAL_DAYS*86400,now))
+    if new: c.execute("INSERT INTO users(uid,uname,name,sub_end,joined) VALUES(?,?,?,?,?)",(uid,un,nm,now+get_trial_days()*86400,now))
     else:   c.execute("UPDATE users SET uname=?,name=? WHERE uid=?",(un,nm,uid))
     c.commit(); c.close(); return new
 
@@ -548,14 +593,35 @@ def KB_ADM():
     return IM([
         [B(f"🔧 Admin  •  {tu}👥  {au}✅  {tb}🚫","noop")],
         [B(f"📨 {tf} fwd  •  📅 {td} today  •  🆕 {nw}/7d","noop")],
-        [B("👥 Users","a_users"),        B("✅ Active","a_active")],
-        [B("✅ Give Sub","a_give"),       B("❌ Revoke","a_revoke")],
-        [B("🚫 Ban","a_ban"),             B("✅ Unban","a_unban")],
+        [B("👥 Users","a_users"),          B("✅ Active","a_active")],
+        [B("✅ Give Sub","a_give"),         B("❌ Revoke","a_revoke")],
+        [B("🚫 Ban","a_ban"),               B("✅ Unban","a_unban")],
         [B("🔍 Search","a_search")],
-        [B("📢 Broadcast All","a_bc_all"), B("📢 Active Only","a_bc_act")],
-        [B("📊 Stats","a_stats"),        B("📡 Channels","a_chs")],
-        [B("💰 Revenue","a_revenue"),    B("🔄 Restart All","a_restart")],
+        [B("📢 Broadcast All","a_bc_all"),  B("📢 Active Only","a_bc_act")],
+        [B("📊 Stats","a_stats"),           B("📡 Channels","a_chs")],
+        [B("💰 Revenue","a_revenue"),       B("🔄 Restart All","a_restart")],
+        [B("💳 Plan Management","a_plans")],
     ])
+
+# ── PLAN MANAGEMENT KEYBOARD ────────────────────────────────────
+def KB_PLANS():
+    plans = plan_all()
+    trial = get_trial_days()
+    rows = [
+        [B("💳 Plan Management","noop")],
+        [B(f"🎁 Trial Days: {trial}  (tap to change)","a_trial")],
+        [B("─────────────────────","noop")],
+    ]
+    for p in plans:
+        status = "🟢" if p['enabled'] else "🔴"
+        rows.append([
+            B(f"{status} {p['label']}  ₹{p['price']}  {p['days']}d", f"a_plan_edit_{p['key']}"),
+            B("🔴" if p['enabled'] else "🟢", f"a_plan_tog_{p['key']}"),
+            B("🗑", f"a_plan_del_{p['key']}"),
+        ])
+    rows.append([B("➕ Add New Plan","a_plan_add")])
+    rows.append([B("‹ Back","adm")])
+    return IM(rows)
 
 # ── CHANNELS ───────────────────────────────────────────────────
 def KB_CHS(uid):
@@ -734,15 +800,16 @@ def KB_DESTS(cid):
 
 # ── SUBSCRIPTION ───────────────────────────────────────────────
 def KB_SUB(uid):
-    return IM([
+    plans = [p for p in plan_all() if p['enabled']]
+    rows = [
         [B(f"💳  {u_sub_str(uid)}","noop")],
         [B(f"Expires: {u_sub_end_str(uid)}","noop")],
-        [B("⚡ Weekly  ₹19  •  7 Days","buy_w")],
-        [B("🌟 Monthly  ₹49  •  30 Days","buy_m")],
-        [B("👑 Yearly  ₹399  •  365 Days","buy_y")],
-        [B("🔄 Renew","sub_renew"),  B(f"💬 {ADMIN_USERNAME}","support")],
-        [B("‹ Back","main")],
-    ])
+    ]
+    for p in plans:
+        rows.append([B(f"{p['label']}  •  ₹{p['price']}  •  {p['days']} Days", f"buy_{p['key']}")])
+    rows.append([B("🔄 Renew","sub_renew"),  B(f"💬 {ADMIN_USERNAME}","support")])
+    rows.append([B("‹ Back","main")])
+    return IM(rows)
 
 # ═══════════════════════════════════════════════════════════════
 #   QR LOGIN WITH COUNTDOWN TIMER
@@ -829,7 +896,7 @@ async def do_qr(update: Update, ctx):
         await msg.reply_text(
             f"✅ *Login Successful!*\n\n"
             f"👤 {nm}  ({un})\n"
-            f"{'🎁 Free Trial: '+str(TRIAL_DAYS)+' days!' if is_new else '💳 '+u_sub_str(uid)}",
+            f"{'🎁 Free Trial: '+str(get_trial_days())+' days!' if is_new else '💳 '+u_sub_str(uid)}",
             parse_mode="Markdown",
             reply_markup=KB_MAIN(uid)
         )
@@ -898,7 +965,8 @@ async def show_picker(uid, mode, page, edit_target, cid_dest=None):
 TEMP: dict = {}
 (ST_LO,ST_LN,ST_WO,ST_WN,ST_WL,ST_BL,
  ST_HDR,ST_FTR,ST_DLY,ST_AIP,ST_AIT,
- ST_REN,ST_BC,ST_GID,ST_GDY,ST_SRCH) = range(16)
+ ST_REN,ST_BC,ST_GID,ST_GDY,ST_SRCH,
+ ST_PLAN_PRICE,ST_PLAN_DAYS,ST_PLAN_NEW,ST_TRIAL) = range(20)
 
 # ═══════════════════════════════════════════════════════════════
 #   COMMANDS
@@ -918,7 +986,7 @@ async def cmd_start(u: Update, ctx):
         f"🤖 AI post rewriter\n"
         f"📋 Copy mode • 🔗 Replace\n"
         f"✂️ Filters • 📐 Format\n"
-        f"🎁 {TRIAL_DAYS} days free trial\n\n"
+        f"🎁 {get_trial_days()} days free trial\n\n"
         f"Admin: {ADMIN_USERNAME}\n\n"
         f"👇 Tap to login — No OTP!",
         parse_mode="Markdown",
@@ -1259,19 +1327,19 @@ async def cbk(update: Update, ctx):
     # ── SUBSCRIPTION ──
     elif d == "sub": await ED("💳 Subscription",KB_SUB(uid))
     elif d == "sub_renew":
+        plans = [p for p in plan_all() if p['enabled']]
+        rows = [B(f"{p['label']}  ₹{p['price']}  {p['days']}d", f"buy_{p['key']}") for p in plans]
+        rows_kb = [[r] for r in rows] + [[B("‹ Back","sub")]]
         await ED(
-            f"🔄  Plan Renewal\n\n"
-            f"Current: {u_sub_str(uid)}\n"
-            f"Expires: {u_sub_end_str(uid)}\n\n"
-            f"Renew karne ke liye plan choose karo 👇",
-            KB([B("⚡ Weekly  ₹19","buy_w"),B("🌟 Monthly  ₹49","buy_m"),B("👑 Yearly  ₹399","buy_y"),B("‹ Back","sub")])
+            f"🔄 Plan Renewal\n\nCurrent: {u_sub_str(uid)}\nExpires: {u_sub_end_str(uid)}\n\nPlan choose karo 👇",
+            IM(rows_kb)
         )
     elif d.startswith("buy_"):
-        pk=d[4:]; pl=PLANS.get(pk)
-        if not pl: return
-        label,days,price=pl
+        pk=d[4:]; pl=plan_get(pk)
+        if not pl: await ANS("❌ Plan not found!",True); return
+        label=pl['label']; days=pl['days']; price=pl['price']
         await ED(
-            f"╔══ 💳 {label} Plan ══╗\n\n"
+            f"💳 {label} Plan\n\n"
             f"💰 Price  : ₹{price}\n"
             f"⏳ Period : {days} days\n\n"
             f"Payment Steps:\n"
@@ -1281,9 +1349,8 @@ async def cbk(update: Update, ctx):
             f"3️⃣  Screenshot lo\n"
             f"4️⃣  Admin ko bhejo: {ADMIN_USERNAME}\n"
             f"5️⃣  Write: Plan:{label} | ID:{uid}\n\n"
-            f"✅  Admin activates in 5-10 min\n"
-            f"╚{'═'*26}╝",
-            KB([B(f"💬  Contact  {ADMIN_USERNAME}","support"),B("‹ Back","sub")])
+            f"✅  Admin activates in 5-10 min",
+            KB([B(f"💬 Contact {ADMIN_USERNAME}","support"),B("‹ Back","sub")])
         )
     elif d == "contact_admin": await ED(f"💬 Admin: {ADMIN_USERNAME}\n\nYour ID: `{uid}`",KB([B("‹ Back","sub")]))
 
@@ -1343,16 +1410,15 @@ async def _admin_cbk(d, uid, q, ctx, ED, ANS):
 
     elif d == "a_revenue":
         users=u_all(); au=sum(1 for u in users if u_ok(u['uid']))
-        est = au * 49
+        plans = plan_all()
+        lines = "\n".join([f"  {p['label']} ₹{p['price']} × ? users" for p in plans])
+        m_plan = next((p['price'] for p in plans if p['key']=='m'), 49)
         await ED(
             f"💰 Revenue Dashboard\n\n"
             f"✅ Active Subscribers: {au}\n"
-            f"💵 Est. Monthly Revenue: ₹{est}\n\n"
-            f"Plan Breakdown:\n"
-            f"Weekly  (₹19) × ? = ₹?\n"
-            f"Monthly (₹49) × {au} = ₹{au*49}\n"
-            f"Yearly  (₹399) × ? = ₹?\n",
-            KB([B("‹ Back","adm")])
+            f"💵 Est. Revenue (all monthly): ₹{au*m_plan}\n\n"
+            f"Plans:\n{lines}",
+            KB([B("💳 Manage Plans","a_plans"), B("‹ Back","adm")])
         )
 
     elif d == "a_chs":
@@ -1374,6 +1440,56 @@ async def _admin_cbk(d, uid, q, ctx, ED, ANS):
     elif d == "a_unban":  ctx.user_data['st']=ST_GID; ctx.user_data['sa']='unban';  await q.message.reply_text("✅ User ID (unban karna):\n\n/cancel")
     elif d == "a_bc_all": ctx.user_data['st']=ST_BC; ctx.user_data['bt']='all';    await q.message.reply_text("📢 Message (ALL users):\n\n/cancel")
     elif d == "a_bc_act": ctx.user_data['st']=ST_BC; ctx.user_data['bt']='active'; await q.message.reply_text("📢 Message (ACTIVE only):\n\n/cancel")
+
+    # ── PLAN MANAGEMENT ──
+    elif d == "a_plans":
+        await ED("💳 Plan Management", KB_PLANS())
+
+    elif d == "a_trial":
+        ctx.user_data['st'] = ST_TRIAL
+        await q.message.reply_text(
+            f"🎁 Trial Days change karo\n\n"
+            f"Current: {get_trial_days()} days\n\n"
+            f"Naya number bhejo (e.g. 7):\n\n/cancel"
+        )
+
+    elif d.startswith("a_plan_tog_"):
+        pk = d[11:]
+        p = plan_get(pk)
+        if p:
+            plan_upd(pk, enabled=0 if p['enabled'] else 1)
+            await ANS(f"{'🟢 Enabled' if not p['enabled'] else '🔴 Disabled'}", True)
+        await ED("💳 Plan Management", KB_PLANS())
+
+    elif d.startswith("a_plan_del_"):
+        pk = d[11:]
+        plan_del(pk)
+        await ANS("🗑 Plan deleted!", True)
+        await ED("💳 Plan Management", KB_PLANS())
+
+    elif d.startswith("a_plan_edit_"):
+        pk = d[12:]
+        p = plan_get(pk)
+        if not p: return
+        TEMP[uid] = {'plan_key': pk, 'step': 'price'}
+        ctx.user_data['st'] = ST_PLAN_PRICE
+        await q.message.reply_text(
+            f"✏️ Edit Plan: {p['label']}\n\n"
+            f"Current Price: ₹{p['price']}\n"
+            f"Current Days: {p['days']}\n\n"
+            f"Naya PRICE bhejo (₹):\n\n/cancel"
+        )
+
+    elif d == "a_plan_add":
+        TEMP[uid] = {'step': 'new_plan'}
+        ctx.user_data['st'] = ST_PLAN_NEW
+        await q.message.reply_text(
+            "➕ New Plan Add\n\n"
+            "Format mein bhejo:\n"
+            "LABEL,DAYS,PRICE\n\n"
+            "Example:\n"
+            "💎 Premium,90,149\n\n/cancel"
+        )
 
 # ═══════════════════════════════════════════════════════════════
 #   MESSAGE HANDLER
@@ -1515,6 +1631,82 @@ async def msg_hdl(update: Update, ctx):
                 )
             else: await update.message.reply_text("❌ User not found.",reply_markup=KB_ADM())
         except: await update.message.reply_text("❌ Valid User ID bhejo!",reply_markup=KB_ADM())
+
+    # ── PLAN EDITING STATES ──────────────────────────────────────
+    elif st==ST_TRIAL:
+        if uid not in ADMIN_IDS: return
+        ctx.user_data.pop('st',None)
+        try:
+            days = max(0, int(txt))
+            setting_set('trial_days', days)
+            await update.message.reply_text(
+                f"✅ Trial updated: {days} days\n\nNaye users ko {days} days trial milega.",
+                reply_markup=KB([B("💳 Plans","a_plans"), B("‹ Admin","adm")])
+            )
+        except:
+            await update.message.reply_text("❌ Number bhejo! e.g. 7")
+
+    elif st==ST_PLAN_PRICE:
+        if uid not in ADMIN_IDS: return
+        pk = TEMP.get(uid,{}).get('plan_key')
+        try:
+            price = max(0, int(txt))
+            TEMP.setdefault(uid,{})['new_price'] = price
+            TEMP[uid]['step'] = 'days'
+            ctx.user_data['st'] = ST_PLAN_DAYS
+            p = plan_get(pk)
+            await update.message.reply_text(
+                f"✅ Price: ₹{price}\n\n"
+                f"Ab DAYS bhejo (current: {p['days']}):\n\n/cancel"
+            )
+        except:
+            await update.message.reply_text("❌ Valid price bhejo! e.g. 49")
+
+    elif st==ST_PLAN_DAYS:
+        if uid not in ADMIN_IDS: return
+        pk = TEMP.get(uid,{}).get('plan_key')
+        new_price = TEMP.get(uid,{}).get('new_price')
+        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        try:
+            days = max(1, int(txt))
+            plan_upd(pk, price=new_price, days=days)
+            p = plan_get(pk)
+            await update.message.reply_text(
+                f"✅ Plan Updated!\n\n"
+                f"Plan : {p['label']}\n"
+                f"Price: ₹{new_price}\n"
+                f"Days : {days}",
+                reply_markup=KB([B("💳 Plans","a_plans"), B("‹ Admin","adm")])
+            )
+        except:
+            await update.message.reply_text("❌ Valid days bhejo! e.g. 30")
+
+    elif st==ST_PLAN_NEW:
+        if uid not in ADMIN_IDS: return
+        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        try:
+            parts = txt.split(',')
+            if len(parts) != 3: raise ValueError
+            label = parts[0].strip()
+            days  = max(1, int(parts[1].strip()))
+            price = max(0, int(parts[2].strip()))
+            # Generate unique key
+            import hashlib
+            key = hashlib.md5(label.encode()).hexdigest()[:4]
+            plan_add(key, label, days, price)
+            await update.message.reply_text(
+                f"✅ New Plan Added!\n\n"
+                f"Plan : {label}\n"
+                f"Days : {days}\n"
+                f"Price: ₹{price}",
+                reply_markup=KB([B("💳 Plans","a_plans"), B("‹ Admin","adm")])
+            )
+        except:
+            await update.message.reply_text(
+                "❌ Format galat hai!\n\n"
+                "Sahi format:\nLABEL,DAYS,PRICE\n\n"
+                "Example:\n💎 Premium,90,149"
+            )
 
 # ═══════════════════════════════════════════════════════════════
 #   MAIN
