@@ -486,48 +486,48 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
         if ch.get('copy_mode'):
             if real_media:
                 cap = None if (is_sticker or is_gif) else (raw or None)
-                sent = False
-                # Method 1: Direct send_file with media object
+                s = None
+
+                # Method 1 (BEST): Download bytes → Re-upload
+                # This works even for protected channels
                 try:
-                    s = await cl.send_file(
-                        did,
-                        file=msg.media,
-                        caption=cap,
-                        silent=sil,
-                        buttons=None,
-                        reply_to=reply_to_msg_id,
-                        force_document=False,
-                    )
-                    sent = True
-                    LOG.info(f"Media sent via send_file to {did}")
+                    media_bytes = await cl.download_media(msg, file=bytes)
+                    if media_bytes:
+                        s = await cl.send_file(
+                            did,
+                            file=media_bytes,
+                            caption=cap,
+                            silent=sil,
+                            reply_to=reply_to_msg_id,
+                        )
+                        LOG.info(f"✅ Media upload to {did}")
                 except Exception as e1:
-                    LOG.warning(f"send_file failed: {e1}")
+                    LOG.warning(f"Upload failed: {e1}")
+                    s = None
 
-                # Method 2: Download then re-upload
-                if not sent:
+                # Method 2: Direct file reference
+                if not s:
                     try:
-                        media_bytes = await cl.download_media(msg, file=bytes)
-                        if media_bytes:
-                            s = await cl.send_file(
-                                did,
-                                file=media_bytes,
-                                caption=cap,
-                                silent=sil,
-                                reply_to=reply_to_msg_id,
-                            )
-                            sent = True
-                            LOG.info(f"Media sent via download+upload to {did}")
+                        s = await cl.send_file(
+                            did,
+                            file=msg.media,
+                            caption=cap,
+                            silent=sil,
+                            buttons=None,
+                            reply_to=reply_to_msg_id,
+                        )
+                        LOG.info(f"✅ Media send_file to {did}")
                     except Exception as e2:
-                        LOG.warning(f"download+upload failed: {e2}")
+                        LOG.warning(f"send_file failed: {e2}")
+                        s = None
 
-                # Method 3: Forward (shows source name but media goes through)
-                if not sent:
+                # Method 3: Native forward (shows source name)
+                if not s:
                     try:
                         s = await cl.forward_messages(did, msg)
-                        sent = True
-                        LOG.info(f"Media forwarded (fallback) to {did}")
+                        LOG.info(f"✅ Media forwarded to {did}")
                     except Exception as e3:
-                        LOG.error(f"All methods failed: {e3}")
+                        LOG.error(f"❌ All media methods failed: {e3}")
                         return None
 
             elif raw:
@@ -1164,21 +1164,27 @@ async def cbk(update: Update, ctx):
     if is_admin_cb:
         await _admin_cbk(d, uid, q, ctx, ED, ANS); return
 
-    # ── SESSION CHECK — with auto-redirect to login ──
+    # ── SESSION CHECK ──
+    # Check memory cache first (fastest), then ACL (engine running = logged in)
     sess = s_get(uid)
-    if not sess and not is_admin:
-        # User not logged in — show login button instead of error
+    logged_in = bool(sess) or (uid in ACL)
+
+    if not logged_in and not is_admin:
         try:
             await q.edit_message_text(
-                f"⚡ {BOT_NAME}\n\nLogin karo pehle:",
+                f"⚡ {BOT_NAME}\n\nLogin karo:",
                 reply_markup=KB([B("📱 Login with QR Code","qr_login")])
             )
         except:
             await q.message.reply_text(
-                f"⚡ {BOT_NAME}\n\nLogin karo pehle:",
+                f"⚡ {BOT_NAME}\n\nLogin karo:",
                 reply_markup=KB([B("📱 Login with QR Code","qr_login")])
             )
         return
+
+    # If session exists but engine not running — auto-start
+    if sess and uid not in ACL and not is_admin:
+        asyncio.create_task(eng_start(uid))
 
     # ── MAIN ──
     if d == "main":
@@ -2163,7 +2169,6 @@ def main():
     app = Application.builder().token(BOT_TOKEN).request(request).post_init(post_init).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("menu",   cmd_menu))
-    app.add_handler(CommandHandler("admin",  cmd_admin))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CallbackQueryHandler(cbk))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_hdl))
