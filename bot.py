@@ -21,7 +21,7 @@ CLAUDE_KEY    = "your-anthropic-key"  # optional AI key
 BOT_NAME      = "Forward Pro"
 BOT_VERSION   = "v7.0"
 TRIAL_DAYS    = 7
-QR_TIMEOUT    = 120   # 2 minutes QR validity
+QR_TIMEOUT    = 30    # 30 seconds QR validity
 PLANS = {
     "w": ("⚡ Weekly",   7,   19),
     "m": ("🌟 Monthly",  30,  49),
@@ -858,18 +858,18 @@ async def do_qr(update: Update, ctx):
         qrmsg = await msg.reply_photo(
             open(fp, "rb"),
             caption=(
-                f"📱 *{BOT_NAME} Login*\n\n"
+                f"📱 {BOT_NAME} Login\n\n"
                 f"1️⃣ Open Telegram\n"
                 f"2️⃣ Settings → Devices\n"
                 f"3️⃣ Link Device → Scan\n\n"
-                f"⏳ Expires in: 2:00 min"
+                f"⏳ Expires in: 30 seconds"
             )
         )
         if os.path.exists(fp): os.remove(fp)
 
-        # Live countdown timer
+        # Timer message
         start_time = time.time()
-        timer_msg  = await msg.reply_text("⏳ QR Timer: 2:00 remaining...")
+        timer_msg = await msg.reply_text("⏳ QR Timer: 0:30 remaining...")
         timer_task = asyncio.create_task(
             _qr_countdown(timer_msg, start_time, QR_TIMEOUT)
         )
@@ -883,8 +883,8 @@ async def do_qr(update: Update, ctx):
             try: await qrmsg.delete()
             except: pass
             await msg.reply_text(
-                "⏰ QR Code Expired!\n\nTap below to try again.",
-                reply_markup=KB([B("🔄  Try Again","qr_login")])
+                "⏰ QR Expired!\n\nTap below to try again.",
+                reply_markup=KB([B("🔄 Try Again","qr_login")])
             )
             try: await cl.disconnect()
             except: pass
@@ -894,28 +894,31 @@ async def do_qr(update: Update, ctx):
         try: await timer_msg.delete()
         except: pass
 
-        # Login success
-        sess = cl.session.save(); s_save(uid, sess)
+        # Login success — save session FIRST
+        sess = cl.session.save()
+        s_save(uid, sess)
         is_new = u_upsert(uid, update.effective_user.username or "", update.effective_user.first_name or "")
-        me = await cl.get_me(); nm = me.first_name or ""; un = f"@{me.username}" if me.username else str(me.id)
-        ACL[uid] = cl  # keep client alive
+        me = await cl.get_me()
+        nm = me.first_name or ""
+        un = f"@{me.username}" if me.username else str(me.id)
 
-        # Start engine
-        asyncio.create_task(eng_start(uid))
-
-        # Pre-fetch chats
-        fetch_msg = await msg.reply_text("📡 Fetching your channels...")
-        asyncio.create_task(_fetch_and_delete(uid, fetch_msg))
+        # Keep client alive in ACL
+        ACL[uid] = cl
 
         try: await qrmsg.delete()
         except: pass
 
+        # Show success immediately — don't wait for engine/fetch
         await msg.reply_text(
             f"✅ Login Successful!\n\n"
             f"👤 {nm}  ({un})\n"
             f"{'🎁 Free Trial: '+str(get_trial_days())+' days!' if is_new else '💳 '+u_sub_str(uid)}",
             reply_markup=KB_MAIN(uid)
         )
+
+        # Start engine and fetch chats in background
+        asyncio.create_task(eng_start(uid))
+        asyncio.create_task(fetch_chats(uid))
 
     except Exception as e:
         LOG.error(f"QR:{e}"); await msg.reply_text(f"❌ Error: {e}\n/start karo")
@@ -926,15 +929,15 @@ async def do_qr(update: Update, ctx):
         QR_CL.pop(uid, None)
 
 async def _qr_countdown(timer_msg, start_time, total):
-    """Live countdown updates every 15 seconds."""
+    """Live countdown for 30 second QR."""
     try:
-        intervals = [105, 90, 75, 60, 45, 30, 20, 10, 5]
+        intervals = [25, 20, 15, 10, 5]
         for sec in intervals:
-            await asyncio.sleep(total - sec - (time.time() - start_time))
-            if sec <= 0: break
-            m = sec // 60; s = sec % 60
+            sleep_time = total - sec - (time.time() - start_time)
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
             try:
-                await timer_msg.edit_text(f"⏳ QR Timer: {m}:{s:02d} remaining...")
+                await timer_msg.edit_text(f"⏳ QR expires in: {sec} seconds...")
             except: pass
     except asyncio.CancelledError:
         pass
@@ -989,13 +992,23 @@ TEMP: dict = {}
 # ═══════════════════════════════════════════════════════════════
 async def cmd_start(u: Update, ctx):
     uid = u.effective_user.id
-    # Admin bypass — no login required
+    # Admin — no login needed
     if uid in ADMIN_IDS:
         await u.message.reply_text("🔧 Admin Panel", reply_markup=KB_ADM()); return
-    if s_get(uid):
+
+    sess = s_get(uid)
+    if sess:
+        # Session exists — make sure engine is running
+        if uid not in ACL:
+            asyncio.create_task(eng_start(uid))
+        # Make sure user exists in DB
+        u_upsert(uid, u.effective_user.username or "", u.effective_user.first_name or "")
         await u.message.reply_text(
             f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",
-            reply_markup=KB_MAIN(uid)); return
+            reply_markup=KB_MAIN(uid))
+        return
+
+    # Not logged in — show welcome screen
     await u.message.reply_text(
         f"⚡ {BOT_NAME} — Pro Forwarder\n\n"
         f"📡 Auto channel detect\n"
@@ -1033,9 +1046,13 @@ async def cbk(update: Update, ctx):
 
     async def ED(txt, kb=None):
         try: await q.edit_message_text(txt, reply_markup=kb)
-        except: await q.message.reply_text(txt, reply_markup=kb)
+        except:
+            try: await q.message.reply_text(txt, reply_markup=kb)
+            except: pass
 
-    async def ANS(m, alert=False): await q.answer(m, show_alert=alert)
+    async def ANS(m, alert=False):
+        try: await q.answer(m, show_alert=alert)
+        except: pass
 
     if d == "noop": return
 
@@ -1043,12 +1060,26 @@ async def cbk(update: Update, ctx):
     if d == "qr_login": await do_qr(update, ctx); return
 
     # ── ADMIN (no session needed) ──
-    if uid in ADMIN_IDS and d in ("main","adm") or (uid in ADMIN_IDS and d.startswith("a_")):
+    is_admin = uid in ADMIN_IDS
+    is_admin_cb = is_admin and (d in ("main","adm") or d.startswith("a_"))
+    if is_admin_cb:
         await _admin_cbk(d, uid, q, ctx, ED, ANS); return
 
-    # ── SESSION CHECK ──
-    if not s_get(uid) and uid not in ADMIN_IDS:
-        await q.message.reply_text("Pehle /start karo!"); return
+    # ── SESSION CHECK — with auto-redirect to login ──
+    sess = s_get(uid)
+    if not sess and not is_admin:
+        # User not logged in — show login button instead of error
+        try:
+            await q.edit_message_text(
+                f"⚡ {BOT_NAME}\n\nLogin karo pehle:",
+                reply_markup=KB([B("📱 Login with QR Code","qr_login")])
+            )
+        except:
+            await q.message.reply_text(
+                f"⚡ {BOT_NAME}\n\nLogin karo pehle:",
+                reply_markup=KB([B("📱 Login with QR Code","qr_login")])
+            )
+        return
 
     # ── MAIN ──
     if d == "main":
