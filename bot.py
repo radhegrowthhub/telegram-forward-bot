@@ -15,8 +15,8 @@ SETUP:
 API_ID        = 29770180
 API_HASH      = "e4452a45c8d4c9d0d7250f8017033472"
 BOT_TOKEN     = "8336442095:AAF6doNdq6Hdr3kUGrZH0hdOge8eDIt0G2U"
-ADMIN_IDS     = [8660435467]           # ← SIRF aapka Telegram ID — bot owner only
-ADMIN_USERNAME = "@Shaan_Malik_Official"  # ← admin contact
+ADMIN_IDS     = [8660435467]
+ADMIN_USERNAME = "@Shaan_Malik_Official"
 CLAUDE_KEY    = "your-anthropic-key"  # optional AI key
 BOT_NAME      = "Forward Pro"
 BOT_VERSION   = "v7.0"
@@ -863,8 +863,7 @@ async def do_qr(update: Update, ctx):
                 f"2️⃣ Settings → Devices\n"
                 f"3️⃣ Link Device → Scan\n\n"
                 f"⏳ Expires in: 2:00 min"
-            ),
-            parse_mode="Markdown"
+            )
         )
         if os.path.exists(fp): os.remove(fp)
 
@@ -912,10 +911,9 @@ async def do_qr(update: Update, ctx):
         except: pass
 
         await msg.reply_text(
-            f"✅ *Login Successful!*\n\n"
+            f"✅ Login Successful!\n\n"
             f"👤 {nm}  ({un})\n"
             f"{'🎁 Free Trial: '+str(get_trial_days())+' days!' if is_new else '💳 '+u_sub_str(uid)}",
-            parse_mode="Markdown",
             reply_markup=KB_MAIN(uid)
         )
 
@@ -999,7 +997,7 @@ async def cmd_start(u: Update, ctx):
             f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",
             reply_markup=KB_MAIN(uid)); return
     await u.message.reply_text(
-        f"⚡ *{BOT_NAME}* — Pro Forwarder\n\n"
+        f"⚡ {BOT_NAME} — Pro Forwarder\n\n"
         f"📡 Auto channel detect\n"
         f"🤖 AI post rewriter\n"
         f"📋 Copy mode • 🔗 Replace\n"
@@ -1007,7 +1005,6 @@ async def cmd_start(u: Update, ctx):
         f"🎁 {get_trial_days()} days free trial\n\n"
         f"Admin: {ADMIN_USERNAME}\n\n"
         f"👇 Tap to login — No OTP!",
-        parse_mode="Markdown",
         reply_markup=KB([B("📱 Login with QR Code","qr_login")])
     )
 
@@ -1781,26 +1778,26 @@ async def msg_hdl(update: Update, ctx):
     elif st==ST_LO:
         TEMP.setdefault(uid,{})['old']=txt; ctx.user_data['st']=ST_LN
         await _del_prompt(); await _del_user()
-        m=await update.message.reply_text(f"✅ Old: `{txt}`\nNaya bhejo:\n\n/cancel",parse_mode="Markdown")
+        m=await update.message.reply_text(f"✅ Old: `{txt}`\nNaya bhejo:\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
     elif st==ST_LN:
         cid=_cid(); old=TEMP.get(uid,{}).get('old','')
         rp_add(cid,uid,'link',old,txt)
         await _del_prompt(); await _del_user()
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ `{old}` → `{txt}`",parse_mode="Markdown",reply_markup=KB([B("➕ More",f"add_lrp_{cid or 0}"),B("‹ Back",f"lrp_{cid or 0}")]))
+        await update.message.reply_text(f"✅ `{old}` → `{txt}`",reply_markup=KB([B("➕ More",f"add_lrp_{cid or 0}"),B("‹ Back",f"lrp_{cid or 0}")]))
 
     elif st==ST_WO:
         TEMP.setdefault(uid,{})['old']=txt; ctx.user_data['st']=ST_WN
         await _del_prompt(); await _del_user()
-        m=await update.message.reply_text(f"✅ Old: `{txt}`\nNaya bhejo:\n\n/cancel",parse_mode="Markdown")
+        m=await update.message.reply_text(f"✅ Old: `{txt}`\nNaya bhejo:\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
     elif st==ST_WN:
         cid=_cid(); old=TEMP.get(uid,{}).get('old','')
         rp_add(cid,uid,'word',old,txt)
         await _del_prompt(); await _del_user()
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ `{old}` → `{txt}`",parse_mode="Markdown",reply_markup=KB([B("➕ More",f"add_wrp_{cid or 0}"),B("‹ Back",f"wrp_{cid or 0}")]))
+        await update.message.reply_text(f"✅ `{old}` → `{txt}`",reply_markup=KB([B("➕ More",f"add_wrp_{cid or 0}"),B("‹ Back",f"wrp_{cid or 0}")]))
 
     elif st in (ST_WL,ST_BL):
         cid=_cid(); ft=TEMP.get(uid,{}).get('ft','whitelist')
@@ -1808,7 +1805,7 @@ async def msg_hdl(update: Update, ctx):
         await _del_prompt(); await _del_user()
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
         icon="✅" if ft=='whitelist' else "🚫"
-        await update.message.reply_text(f"{icon} `{txt}`",parse_mode="Markdown",reply_markup=KB([B("➕ More",f"add_{'wl' if ft=='whitelist' else 'bl'}_{cid or 0}"),B("‹ Back",f"flt_{cid or 0}")]))
+        await update.message.reply_text(f"{icon} `{txt}`",reply_markup=KB([B("➕ More",f"add_{'wl' if ft=='whitelist' else 'bl'}_{cid or 0}"),B("‹ Back",f"flt_{cid or 0}")]))
 
     elif st==ST_DLY:
         cid=_cid()
