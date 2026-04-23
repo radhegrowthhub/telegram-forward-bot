@@ -469,6 +469,8 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
         is_webpage = isinstance(getattr(msg, 'media', None), MessageMediaWebPage)
         real_media = bool(msg.media and not is_webpage)
 
+        LOG.info(f"_fwd did={did} copy={ch.get('copy_mode')} real_media={real_media} is_wp={is_webpage} raw_len={len(raw)}")
+
         # Detect sticker (don't add caption to stickers)
         is_sticker = False
         is_gif = False
@@ -483,8 +485,9 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
 
         if ch.get('copy_mode'):
             if real_media:
-                # Stickers and GIFs — no caption, send as-is
                 cap = None if (is_sticker or is_gif) else (raw or None)
+                sent = False
+                # Method 1: Direct send_file with media object
                 try:
                     s = await cl.send_file(
                         did,
@@ -495,13 +498,38 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
                         reply_to=reply_to_msg_id,
                         force_document=False,
                     )
+                    sent = True
+                    LOG.info(f"Media sent via send_file to {did}")
                 except Exception as e1:
-                    LOG.warning(f"send_file failed ({e1}), trying forward...")
+                    LOG.warning(f"send_file failed: {e1}")
+
+                # Method 2: Download then re-upload
+                if not sent:
+                    try:
+                        media_bytes = await cl.download_media(msg, file=bytes)
+                        if media_bytes:
+                            s = await cl.send_file(
+                                did,
+                                file=media_bytes,
+                                caption=cap,
+                                silent=sil,
+                                reply_to=reply_to_msg_id,
+                            )
+                            sent = True
+                            LOG.info(f"Media sent via download+upload to {did}")
+                    except Exception as e2:
+                        LOG.warning(f"download+upload failed: {e2}")
+
+                # Method 3: Forward (shows source name but media goes through)
+                if not sent:
                     try:
                         s = await cl.forward_messages(did, msg)
-                    except Exception as e2:
-                        LOG.error(f"forward failed: {e2}")
+                        sent = True
+                        LOG.info(f"Media forwarded (fallback) to {did}")
+                    except Exception as e3:
+                        LOG.error(f"All methods failed: {e3}")
                         return None
+
             elif raw:
                 s = await cl.send_message(
                     did, raw,
@@ -512,7 +540,7 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
             else:
                 return None
         else:
-            # Forward mode — shows source channel name
+            # Forward mode
             try:
                 s = await cl.forward_messages(did, msg)
             except Exception as ef:
@@ -550,31 +578,38 @@ async def eng_start(uid):
             if not u_bot_on(uid) or not u_ok(uid): return
             matched = sm.get(ev.chat_id,[]) or sm.get(str(ev.chat_id),[])
             for _ch_stale in matched:
-                # Fresh settings from DB on every message
                 ch = ch_get(_ch_stale['id'])
                 if not ch or not ch['enabled']: continue
                 if ch.get('dup_check') and l_dup(ch['id'],ev.message.id,str(ev.chat_id)): continue
 
                 txt = (ev.message.text or ev.message.caption or "").lower()
-                has_media = bool(ev.message.media)
+
+                # Real media = photo/video/sticker etc (NOT webpage preview)
+                has_real_media = (
+                    bool(ev.message.media) and
+                    not isinstance(ev.message.media, MessageMediaWebPage)
+                )
+                has_text = bool(ev.message.text)
+
+                LOG.info(f"MSG uid={uid} ch={ch['id']} media={has_real_media} txt_len={len(txt)}")
 
                 # Media Only / Text Only filter
-                if ch.get('media_only') and not has_media: continue
-                if ch.get('text_only') and has_media: continue
+                if ch.get('media_only') and not has_real_media: continue
+                if ch.get('text_only') and has_real_media: continue
 
-                fils = f_get(ch['id'])
-
-                # Blacklist — skip if text contains blacklisted word
-                # (skip check if message is pure media with no text)
-                if txt:
-                    if any(f['val'].lower() in txt for f in fils if f['ftype']=='blacklist'):
+                # ── TEXT FILTERS (Whitelist/Blacklist) ──────────────
+                # Media messages (photos/videos/stickers) ALWAYS pass
+                # Filters only apply to pure TEXT messages (no media)
+                if not has_real_media:
+                    fils = f_get(ch['id'])
+                    # Blacklist
+                    if txt and any(f['val'].lower() in txt for f in fils if f['ftype']=='blacklist'):
+                        LOG.info(f"Blocked by blacklist uid={uid}")
                         continue
-
-                # Whitelist — ONLY apply if message has text
-                # Pure media (no caption) always passes whitelist
-                wl = [f for f in fils if f['ftype']=='whitelist']
-                if wl and txt:
-                    if not any(f['val'].lower() in txt for f in wl):
+                    # Whitelist
+                    wl = [f for f in fils if f['ftype']=='whitelist']
+                    if wl and txt and not any(f['val'].lower() in txt for f in wl):
+                        LOG.info(f"Blocked by whitelist uid={uid}")
                         continue
                 repls=rp_get(ch['id']); dests=json.loads(ch['dests']); cnt=0
 
