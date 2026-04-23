@@ -12,10 +12,10 @@ SETUP:
 # ═══════════════════════════════════════════════════════════════
 #   ⚙️  CONFIG
 # ═══════════════════════════════════════════════════════════════
-API_ID        = 39216193
-API_HASH      = "ab8292e51e2f837d8127bfd18648b8b6"
-BOT_TOKEN     = "7742398158:AAEhtEbqxu5eecOwGT3YYW7_XiLp9YONjzw"
-ADMIN_IDS     = [8286417034]           # ← SIRF aapka Telegram ID — bot owner only
+API_ID        = 29770180
+API_HASH      = "e4452a45c8d4c9d0d7250f8017033472"
+BOT_TOKEN     = "8721421757:AAFd3tkPun61GToSq_T5vynM1YeVtpPpFoo"
+ADMIN_IDS     = [8660435467]           # ← SIRF aapka Telegram ID — bot owner only
 ADMIN_USERNAME = "@Shaan_Malik_Dubai"  # ← admin contact
 CLAUDE_KEY    = "your-anthropic-key"  # optional AI key
 BOT_NAME      = "Forward Pro"
