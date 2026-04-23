@@ -402,7 +402,7 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
     try:
         try: did=int(did)
         except: pass
-        raw = msg.text or msg.caption or ""
+        raw = msg.text or ""
         for r in repls: raw=raw.replace(r['old_val'],r['new_val'])
 
         # ── COMPREHENSIVE LINK BLOCKING ──────────────────────────
@@ -485,66 +485,59 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
 
         if ch.get('copy_mode'):
             if real_media:
-                cap = None if (is_sticker or is_gif) else (raw or None)
+                cap = (raw.strip() or None) if not (is_sticker or is_gif) else None
                 s = None
+                import os as _os
 
-                # Method 1 (BEST): Download bytes → Re-upload
-                # This works even for protected channels
+                # Try 1: send_file with media reference
                 try:
-                    media_bytes = await cl.download_media(msg, file=bytes)
-                    if media_bytes:
-                        s = await cl.send_file(
-                            did,
-                            file=media_bytes,
-                            caption=cap,
-                            silent=sil,
-                            reply_to=reply_to_msg_id,
-                        )
-                        LOG.info(f"✅ Media upload to {did}")
+                    s = await cl.send_file(
+                        did, file=msg.media,
+                        caption=cap, silent=sil,
+                        buttons=None, reply_to=reply_to_msg_id,
+                    )
+                    LOG.info(f"✅ send_file OK {did}")
                 except Exception as e1:
-                    LOG.warning(f"Upload failed: {e1}")
-                    s = None
+                    LOG.warning(f"send_file err: {e1}")
 
-                # Method 2: Direct file reference
+                # Try 2: download to temp file → re-upload
                 if not s:
+                    tmp_path = f"tmp_{uid}_{did}.bin"
                     try:
+                        await cl.download_media(msg, file=tmp_path)
                         s = await cl.send_file(
-                            did,
-                            file=msg.media,
-                            caption=cap,
-                            silent=sil,
-                            buttons=None,
+                            did, file=tmp_path,
+                            caption=cap, silent=sil,
                             reply_to=reply_to_msg_id,
                         )
-                        LOG.info(f"✅ Media send_file to {did}")
+                        LOG.info(f"✅ dl+upload OK {did}")
                     except Exception as e2:
-                        LOG.warning(f"send_file failed: {e2}")
-                        s = None
+                        LOG.warning(f"dl+upload err: {e2}")
+                    try: _os.remove(tmp_path)
+                    except: pass
 
-                # Method 3: Native forward (shows source name)
+                # Try 3: native forward (always works)
                 if not s:
                     try:
                         s = await cl.forward_messages(did, msg)
-                        LOG.info(f"✅ Media forwarded to {did}")
+                        LOG.info(f"✅ fwd fallback OK {did}")
                     except Exception as e3:
-                        LOG.error(f"❌ All media methods failed: {e3}")
+                        LOG.error(f"❌ ALL FAILED {did}: {e3}")
                         return None
 
-            elif raw:
+            elif raw.strip():
                 s = await cl.send_message(
-                    did, raw,
-                    silent=sil,
-                    link_preview=False,
-                    reply_to=reply_to_msg_id,
+                    did, raw.strip(), silent=sil,
+                    link_preview=False, reply_to=reply_to_msg_id,
                 )
             else:
                 return None
         else:
-            # Forward mode
+            # Forward mode — most reliable for all media
             try:
                 s = await cl.forward_messages(did, msg)
             except Exception as ef:
-                LOG.error(f"forward_messages failed: {ef}")
+                LOG.error(f"forward_messages: {ef}")
                 return None
 
         if ch.get('pin_msg') and s:
@@ -582,7 +575,7 @@ async def eng_start(uid):
                 if not ch or not ch['enabled']: continue
                 if ch.get('dup_check') and l_dup(ch['id'],ev.message.id,str(ev.chat_id)): continue
 
-                txt = (ev.message.text or ev.message.caption or "").lower()
+                txt = (ev.message.text or "").lower()
 
                 # Real media = photo/video/sticker etc (NOT webpage preview)
                 has_real_media = (
@@ -2169,6 +2162,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).request(request).post_init(post_init).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("menu",   cmd_menu))
+    app.add_handler(CommandHandler("admin",  cmd_admin))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CallbackQueryHandler(cbk))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_hdl))
