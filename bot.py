@@ -16,7 +16,7 @@ API_ID        = 29770180
 API_HASH      = "e4452a45c8d4c9d0d7250f8017033472"
 BOT_TOKEN     = "8336442095:AAF6doNdq6Hdr3kUGrZH0hdOge8eDIt0G2U"
 ADMIN_IDS     = [8660435467]           # ← SIRF aapka Telegram ID — bot owner only
-ADMIN_USERNAME = "@Shaan_Malik_Dubai"  # ← admin contact
+ADMIN_USERNAME = "@Shaan_Malik_Official"  # ← admin contact
 CLAUDE_KEY    = "your-anthropic-key"  # optional AI key
 BOT_NAME      = "Forward Pro"
 BOT_VERSION   = "v7.0"
@@ -447,15 +447,33 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
 
         if ch.get('copy_mode'):
             if real_media:
-                # send_file — photos, videos, documents, stickers etc.
-                # NOTE: link_preview is NOT valid for send_file, only send_message
-                s = await cl.send_file(
-                    did, msg.media,
-                    caption=raw,
-                    silent=sil,
-                    buttons=None,
-                    reply_to=reply_to_msg_id,
-                )
+                try:
+                    # Use send_file with the full message object — handles all media types
+                    # (photo, video, document, sticker, gif, voice, audio etc.)
+                    s = await cl.send_file(
+                        did,
+                        file=msg,           # pass entire message, not just media
+                        caption=raw or None,
+                        silent=sil,
+                        buttons=None,
+                        reply_to=reply_to_msg_id,
+                        force_document=False,
+                    )
+                except Exception as e1:
+                    LOG.warning(f"send_file msg failed ({e1}), trying media...")
+                    try:
+                        # Fallback: pass msg.media
+                        s = await cl.send_file(
+                            did,
+                            file=msg.media,
+                            caption=raw or None,
+                            silent=sil,
+                            buttons=None,
+                            reply_to=reply_to_msg_id,
+                        )
+                    except Exception as e2:
+                        LOG.error(f"send_file both failed: {e2}")
+                        return None
             elif raw:
                 s = await cl.send_message(
                     did, raw,
@@ -466,7 +484,7 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
             else:
                 return None
         else:
-            # Forward mode — preserves original format with source channel name
+            # Forward mode — original format with source channel name
             s = await cl.forward_messages(did, msg)
 
         if ch.get('pin_msg') and s:
@@ -1069,21 +1087,232 @@ async def cbk(update: Update, ctx):
 
     elif d == "help":
         await ED(
-            f"❓  Help Guide\n\n"
-            f"SETUP (3 Steps):\n"
-            f"  1. 📡 My Channels → Add New\n"
-            f"  2. Select source (number tap)\n"
-            f"  3. Select destination\n"
-            f"  ✅ Done! Forwarding starts!\n\n"
-            f"FEATURES:\n"
-            f"  ⚙️ Control Panel = All ON/OFF\n"
-            f"  🤖 AI = Auto rewrite posts\n"
-            f"  🔗 Link Replace = URL swap\n"
-            f"  📝 Word Replace = Text swap\n"
-            f"  ✂️ Filters = Keyword rules\n"
-            f"  📐 Format = Post styling\n\n"
-            f"Support: {ADMIN_USERNAME}",
-            KB([B("📡 Add Channel","ch_new"), B("‹ Back","main")])
+            f"❓  Help & Guide\n\n"
+            f"Kisi bhi section ka guide dekho 👇",
+            IM([
+                [B("🚀 Quick Setup Guide","help_setup")],
+                [B("⚙️ Control Panel Guide","help_ctrl")],
+                [B("🔗 Link & Word Replace","help_repl")],
+                [B("✂️ Filters Guide","help_flt")],
+                [B("📐 Post Format Guide","help_fmt")],
+                [B("🤖 AI Rewriter Guide","help_ai")],
+                [B("🟢🔴 ON/OFF Buttons","help_onoff")],
+                [B("💳 Subscription Guide","help_sub")],
+                [B("‹ Back","main")],
+            ])
+        )
+
+    elif d == "help_onoff":
+        await ED(
+            f"🟢🔴 ON/OFF Buttons — Kya matlab hai?\n\n"
+            f"🟢 GREEN = Feature ON hai (chal raha hai)\n"
+            f"🔴 RED   = Feature OFF hai (band hai)\n\n"
+            f"Tap karo toh toggle hota hai:\n"
+            f"🟢 tap → 🔴 (band ho jaayega)\n"
+            f"🔴 tap → 🟢 (chalu ho jaayega)\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Example:\n"
+            f"🟢 Copy Mode = Copy mode ON hai\n"
+            f"🔴 Silent = Silent mode OFF hai\n\n"
+            f"Har button ek alag feature hai,\n"
+            f"ek dusre pe asar nahi karta.",
+            KB([B("‹ Back","help"), B("🏠 Home","main")])
+        )
+
+    elif d == "help_setup":
+        await ED(
+            f"🚀 Quick Setup — 3 Steps\n\n"
+            f"Step 1️⃣ — Channel Add karo\n"
+            f"  📡 My Channels → ➕ Add Channel\n"
+            f"  Apni channel list dikhegi\n"
+            f"  Number dabao jis se forward karna hai\n\n"
+            f"Step 2️⃣ — Destination Add karo\n"
+            f"  Phir list aayegi\n"
+            f"  Number dabao jahan forward karna hai\n\n"
+            f"Step 3️⃣ — Done! 🎉\n"
+            f"  Forwarding shuru ho gayi!\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 Tips:\n"
+            f"• Multiple destinations add kar sakte ho\n"
+            f"• Multiple source channels bhi\n"
+            f"• Har channel ki alag settings\n"
+            f"• Engine ON hona chahiye (Main menu)\n\n"
+            f"⚠️ Bot Engine OFF hone pe forward nahi hoga!",
+            KB([B("‹ Back","help"), B("🏠 Home","main")])
+        )
+
+    elif d == "help_ctrl":
+        await ED(
+            f"⚙️ Control Panel — Har Button Ka Matlab\n\n"
+            f"🟢 Copy Mode\n"
+            f"  ON  = Source channel ka naam nahi dikhega\n"
+            f"  OFF = 'Forwarded from X' dikhega\n\n"
+            f"🔴 Silent\n"
+            f"  ON  = Destination mein notification nahi\n"
+            f"  OFF = Normal notification aayega\n\n"
+            f"🔴 Pin\n"
+            f"  ON  = Forward hone ke baad auto-pin\n"
+            f"  OFF = Pin nahi hoga\n\n"
+            f"🔴 No Caption\n"
+            f"  ON  = Photo/video ka caption hatega\n"
+            f"  OFF = Caption as-is rehega\n\n"
+            f"🔴 Media Only\n"
+            f"  ON  = Sirf photos/videos forward\n"
+            f"  OFF = Sab kuch forward hoga\n\n"
+            f"🔴 Text Only\n"
+            f"  ON  = Sirf text forward\n"
+            f"  OFF = Sab kuch forward hoga\n\n"
+            f"🟢 Dup Check\n"
+            f"  ON  = Same message dobara forward nahi\n"
+            f"  OFF = Duplicate bhi forward hoga\n\n"
+            f"⏱ Delay\n"
+            f"  Kitne second baad forward ho\n"
+            f"  0 = instant, 60 = 1 min baad\n\n"
+            f"📝 Header — Message ke UPAR text\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"  🔥 TRADER PIHU TIPS  ← Header\n"
+            f"  ─────────────────────\n"
+            f"  [Original message]\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"  Use: Branding, category tag\n"
+            f"  Example: '📊 STOCK ALERT'\n"
+            f"  Clear karne ke liye: '-' bhejo\n\n"
+            f"📝 Footer — Message ke NEECHE text\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"  [Original message]\n"
+            f"  ─────────────────────\n"
+            f"  Join 👉 @mychannel    ← Footer\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"  Use: Channel promote, watermark\n"
+            f"  Example: '— Shaan Malik Dubai™'\n"
+            f"  Clear karne ke liye: '-' bhejo",
+            KB([B("‹ Back","help"), B("🏠 Home","main")])
+        )
+
+    elif d == "help_repl":
+        await ED(
+            f"🔄 Link & Word Replace — Kya Karta Hai?\n\n"
+            f"🔗 LINK REPLACE:\n"
+            f"  Source mein koi link hai toh use\n"
+            f"  apne link se replace kar do\n\n"
+            f"  Example:\n"
+            f"  Purana: https://t.me/enemy_channel\n"
+            f"  Naya:   https://t.me/my_channel\n"
+            f"  Ab har post mein link badal jaayega!\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📝 WORD REPLACE:\n"
+            f"  Koi bhi word ya sentence replace karo\n\n"
+            f"  Example:\n"
+            f"  Purana: Shaan Malik\n"
+            f"  Naya:   Admin\n"
+            f"  Source ka naam badal jaayega!\n\n"
+            f"  (Khali rakhne ke liye Naya = '-')\n\n"
+            f"💡 Tip: Multiple replacements add kar sakte ho",
+            KB([B("‹ Back","help"), B("🏠 Home","main")])
+        )
+
+    elif d == "help_flt":
+        await ED(
+            f"✂️ Filters — Kya Forward Ho, Kya Nahi\n\n"
+            f"🔗 LINK BLOCKING:\n"
+            f"⚪ Block ALL Links (Master switch)\n"
+            f"  ON = Sabhi links + @username block\n"
+            f"  OFF = Koi block nahi\n\n"
+            f"Individual controls:\n"
+            f"• http/https/www = Website links block\n"
+            f"• t.me Links = Telegram links block\n"
+            f"• @Username = @mentions block\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ WHITELIST (Forward IF contains):\n"
+            f"  Sirf wo messages forward honge\n"
+            f"  jisme ye word/text ho\n\n"
+            f"  Example: 'BUY' add karo\n"
+            f"  → Sirf 'BUY' wale messages forward\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🚫 BLACKLIST (Skip IF contains):\n"
+            f"  Jo messages mein ye word ho\n"
+            f"  wo forward NAHI honge\n\n"
+            f"  Example: 'ADVERTISEMENT' add karo\n"
+            f"  → Ads skip ho jaayenge!",
+            KB([B("‹ Back","help"), B("🏠 Home","main")])
+        )
+
+    elif d == "help_fmt":
+        await ED(
+            f"📐 Post Format — Message Ki Styling\n\n"
+            f"🔴 Bold Title\n"
+            f"  ON  = Message ki pehli line BOLD ho jaati\n"
+            f"  OFF = Normal text\n\n"
+            f"🔴 Clean Text\n"
+            f"  ON  = Extra spaces aur blank lines hata deta\n"
+            f"  OFF = Original spacing\n\n"
+            f"🔴 No Links\n"
+            f"  ON  = Sabhi links text se hata deta\n"
+            f"  OFF = Links as-is\n\n"
+            f"🔴 No Caption (media ke liye)\n"
+            f"  ON  = Photo/video ka caption delete\n"
+            f"  OFF = Caption rehega\n\n"
+            f"📝 Header\n"
+            f"  Jo text message ke UPAR add hoga\n"
+            f"  Example: '🔥 Daily Tips'\n\n"
+            f"📝 Footer\n"
+            f"  Jo text message ke NEECHE add hoga\n"
+            f"  Example: 'Join @mychannel'\n\n"
+            f"🤖 AI Style\n"
+            f"  AI se message rewrite karo",
+            KB([B("‹ Back","help"), B("🏠 Home","main")])
+        )
+
+    elif d == "help_ai":
+        await ED(
+            f"🤖 AI Rewriter — Post Auto-Rewrite\n\n"
+            f"AI automatically har message ko\n"
+            f"apne style mein rewrite karta hai!\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Available Styles:\n\n"
+            f"📰 News Style\n"
+            f"  Professional news jaisa format\n\n"
+            f"💬 Casual\n"
+            f"  Friendly aur casual tone\n\n"
+            f"🎩 Formal\n"
+            f"  Professional formal tone\n\n"
+            f"✂️ Short\n"
+            f"  2-3 line mein summary\n\n"
+            f"• Bullets\n"
+            f"  Bullet points mein convert\n\n"
+            f"😊 Emoji\n"
+            f"  Emojis add karke engaging banao\n\n"
+            f"🔥 Clickbait\n"
+            f"  Catchy headline style\n\n"
+            f"🧹 Clean\n"
+            f"  Promotions aur links remove\n\n"
+            f"✏️ Custom\n"
+            f"  Apna khud ka AI prompt likho!\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🧪 Test Button\n"
+            f"  Pehle test karo, phir ON karo\n\n"
+            f"⚠️ AI ke liye Anthropic API key chahiye\n"
+            f"  CONFIG mein CLAUDE_KEY daalo",
+            KB([B("‹ Back","help"), B("🏠 Home","main")])
+        )
+
+    elif d == "help_sub":
+        await ED(
+            f"💳 Subscription Guide\n\n"
+            f"🎁 Free Trial: {get_trial_days()} Days\n"
+            f"  New account pe automatic milti hai\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Plans:\n"
+            +"\n".join([f"  {p['label']} = ₹{p['price']} / {p['days']} days" for p in plan_all() if p['enabled']])+
+            f"\n\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"Kaise kharidein:\n"
+            f"1. 💳 Subscription → Plan choose karo\n"
+            f"2. UPI payment karo\n"
+            f"3. Screenshot {ADMIN_USERNAME} ko bhejo\n"
+            f"4. Apna User ID bhejo: (bot mein milega)\n"
+            f"5. Admin 5-10 min mein activate karega\n\n"
+            f"Status check: 💳 Subscription → Status line",
+            KB([B("💳 View Plans","sub"), B("‹ Back","help"), B("🏠 Home","main")])
         )
 
     # ── CHANNELS ──
@@ -1271,9 +1500,18 @@ async def cbk(update: Update, ctx):
         if not ch: await ANS("❌",True); return
         ch_upd(cid,fmt_clean=0 if ch['fmt_clean'] else 1); await ED("📐",KB_FMT(cid))
 
-    elif d.startswith("s_dly_"): cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_DLY; await q.message.reply_text("⏱ Delay seconds (0-3600):\n\n/cancel")
-    elif d.startswith("s_hdr_"): cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_HDR; await q.message.reply_text("📝 Header text (- for none):\n\n/cancel")
-    elif d.startswith("s_ftr_"): cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_FTR; await q.message.reply_text("📝 Footer text (- for none):\n\n/cancel")
+    elif d.startswith("s_dly_"):
+        cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_DLY
+        m=await q.message.reply_text("⏱ Delay seconds (0-3600):\n\n/cancel")
+        TEMP[uid]['prompt_id']=m.message_id
+    elif d.startswith("s_hdr_"):
+        cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_HDR
+        m=await q.message.reply_text("📝 Header text bhejo:\n(- for none)\n\n/cancel")
+        TEMP[uid]['prompt_id']=m.message_id
+    elif d.startswith("s_ftr_"):
+        cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_FTR
+        m=await q.message.reply_text("📝 Footer text bhejo:\n(- for none)\n\n/cancel")
+        TEMP[uid]['prompt_id']=m.message_id
 
     # ── FORMAT ──
     elif d.startswith("fmt_"): cid=int(d[4:]); await ED("📐 Format",KB_FMT(cid))
@@ -1286,8 +1524,14 @@ async def cbk(update: Update, ctx):
         parts=d.split("_"); cid=int(parts[2]); style="_".join(parts[3:])
         ch_upd(cid,ai_style=style); (ch_upd(cid,ai_on=1) if style!='none' else None)
         await ANS(f"✅ {AI_STYLES.get(style,('?',))[0]}",True); await ED("🤖",KB_AI(cid))
-    elif d.startswith("ai_cp_"):    cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_AIP; await q.message.reply_text("✏️ Custom AI prompt:\n\nExample: 'Rewrite as breaking news in Hindi'\n\n/cancel")
-    elif d.startswith("ai_t_"):     cid=int(d[5:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_AIT; await q.message.reply_text("🧪 Test text bhejo:\n\n/cancel")
+    elif d.startswith("ai_cp_"):
+        cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_AIP
+        m=await q.message.reply_text("✏️ Custom AI prompt:\n\nExample: 'Rewrite as breaking news in Hindi'\n\n/cancel")
+        TEMP[uid]['prompt_id']=m.message_id
+    elif d.startswith("ai_t_"):
+        cid=int(d[5:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_AIT
+        m=await q.message.reply_text("🧪 Test text bhejo:\n\n/cancel")
+        TEMP[uid]['prompt_id']=m.message_id
 
     # ── REPLACEMENTS ──
     elif d == "repl_g": await ED("🔄 Replacements",KB_REPL_G(uid))
@@ -1304,8 +1548,14 @@ async def cbk(update: Update, ctx):
         for r in wrp: rows.append([B(f"📝 {r['old_val'][:24]}→{r['new_val'][:14]}","noop"),B("🗑",f"d_rp_{r['id']}")])
         rows.append([B("➕ Add",f"add_wrp_{cid}")]); rows.append([B("‹ Back",f"ch_{cid}"),B("🏠","main")])
         await ED("📝 Word Replace",IM(rows))
-    elif d.startswith("add_lrp_"): cid=int(d[8:]); TEMP[uid]={'cid':cid,'rt':'link'}; ctx.user_data['st']=ST_LO; await q.message.reply_text("🔗 Purana link bhejo:\n\n/cancel")
-    elif d.startswith("add_wrp_"): cid=int(d[8:]); TEMP[uid]={'cid':cid,'rt':'word'}; ctx.user_data['st']=ST_WO; await q.message.reply_text("📝 Purana word bhejo:\n\n/cancel")
+    elif d.startswith("add_lrp_"):
+        cid=int(d[8:]); TEMP[uid]={'cid':cid,'rt':'link'}; ctx.user_data['st']=ST_LO
+        m=await q.message.reply_text("🔗 Purana link bhejo:\n(Jo replace hoga)\n\n/cancel")
+        TEMP[uid]['prompt_id']=m.message_id
+    elif d.startswith("add_wrp_"):
+        cid=int(d[8:]); TEMP[uid]={'cid':cid,'rt':'word'}; ctx.user_data['st']=ST_WO
+        m=await q.message.reply_text("📝 Purana word bhejo:\n(Jo replace hoga)\n\n/cancel")
+        TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("d_rp_"): rp_del(int(d[5:])); await ANS("✅ Removed!")
 
     # ── FILTERS ──
@@ -1313,8 +1563,14 @@ async def cbk(update: Update, ctx):
         cid=int(d[4:]); ch=ch_get(cid)
         if not ch: await ANS("❌ Not found!",True); return
         await ED("✂️ Filters",KB_FLT(cid))
-    elif d.startswith("add_wl_"): cid=int(d[7:]); TEMP[uid]={'cid':cid,'ft':'whitelist'}; ctx.user_data['st']=ST_WL; await q.message.reply_text("✅ Whitelist word:\n(Sirf ye forward honge)\n\n/cancel")
-    elif d.startswith("add_bl_"): cid=int(d[7:]); TEMP[uid]={'cid':cid,'ft':'blacklist'}; ctx.user_data['st']=ST_BL; await q.message.reply_text("🚫 Blacklist word:\n(Ye skip honge)\n\n/cancel")
+    elif d.startswith("add_wl_"):
+        cid=int(d[7:]); TEMP[uid]={'cid':cid,'ft':'whitelist'}; ctx.user_data['st']=ST_WL
+        m=await q.message.reply_text("✅ Whitelist word bhejo:\n(Sirf ye forward honge)\n\n/cancel")
+        TEMP[uid]['prompt_id']=m.message_id
+    elif d.startswith("add_bl_"):
+        cid=int(d[7:]); TEMP[uid]={'cid':cid,'ft':'blacklist'}; ctx.user_data['st']=ST_BL
+        m=await q.message.reply_text("🚫 Blacklist word bhejo:\n(Ye skip honge)\n\n/cancel")
+        TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("d_flt_"): f_del(int(d[6:])); await ANS("✅ Removed!")
 
     # ── DESTINATIONS ──
@@ -1498,7 +1754,18 @@ async def msg_hdl(update: Update, ctx):
     uid=update.effective_user.id; txt=(update.message.text or "").strip()
     st=ctx.user_data.get('st')
 
+    async def _del_prompt():
+        pid=TEMP.get(uid,{}).get('prompt_id')
+        if pid:
+            try: await ctx.bot.delete_message(uid,pid)
+            except: pass
+
+    async def _del_user():
+        try: await update.message.delete()
+        except: pass
+
     if txt=="/cancel":
+        await _del_prompt()
         ctx.user_data.clear(); TEMP.pop(uid,None)
         kb=KB_ADM() if uid in ADMIN_IDS else (KB_MAIN(uid) if s_get(uid) else None)
         await update.message.reply_text("❌ Cancelled.",reply_markup=kb); return
@@ -1506,61 +1773,81 @@ async def msg_hdl(update: Update, ctx):
     def _cid(): return TEMP.get(uid,{}).get('cid')
 
     if st==ST_REN:
-        ch_upd(_cid(),ch_name=txt[:30]); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ Renamed: {txt[:30]}",reply_markup=KB([B("‹ Back",f"ch_{_cid() or 0}")]))
+        cid=_cid(); ch_upd(cid,ch_name=txt[:30])
+        await _del_prompt(); await _del_user()
+        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        await update.message.reply_text(f"✅ Renamed: {txt[:30]}",reply_markup=KB([B("‹ Back",f"ch_{cid or 0}")]))
 
     elif st==ST_LO:
         TEMP.setdefault(uid,{})['old']=txt; ctx.user_data['st']=ST_LN
-        await update.message.reply_text(f"✅ Old: `{txt}`\nNaya bhejo:\n\n/cancel",parse_mode="Markdown")
+        await _del_prompt(); await _del_user()
+        m=await update.message.reply_text(f"✅ Old: `{txt}`\nNaya bhejo:\n\n/cancel",parse_mode="Markdown")
+        TEMP[uid]['prompt_id']=m.message_id
     elif st==ST_LN:
-        old=TEMP.get(uid,{}).get('old',''); rp_add(_cid(),uid,'link',old,txt)
+        cid=_cid(); old=TEMP.get(uid,{}).get('old','')
+        rp_add(cid,uid,'link',old,txt)
+        await _del_prompt(); await _del_user()
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ `{old}` → `{txt}`",parse_mode="Markdown",reply_markup=KB([B("➕ More",f"add_lrp_{_cid() or 0}"),B("‹ Back",f"lrp_{_cid() or 0}")]))
+        await update.message.reply_text(f"✅ `{old}` → `{txt}`",parse_mode="Markdown",reply_markup=KB([B("➕ More",f"add_lrp_{cid or 0}"),B("‹ Back",f"lrp_{cid or 0}")]))
 
     elif st==ST_WO:
         TEMP.setdefault(uid,{})['old']=txt; ctx.user_data['st']=ST_WN
-        await update.message.reply_text(f"✅ Old: `{txt}`\nNaya bhejo:\n\n/cancel",parse_mode="Markdown")
+        await _del_prompt(); await _del_user()
+        m=await update.message.reply_text(f"✅ Old: `{txt}`\nNaya bhejo:\n\n/cancel",parse_mode="Markdown")
+        TEMP[uid]['prompt_id']=m.message_id
     elif st==ST_WN:
-        old=TEMP.get(uid,{}).get('old',''); rp_add(_cid(),uid,'word',old,txt)
+        cid=_cid(); old=TEMP.get(uid,{}).get('old','')
+        rp_add(cid,uid,'word',old,txt)
+        await _del_prompt(); await _del_user()
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ `{old}` → `{txt}`",parse_mode="Markdown",reply_markup=KB([B("➕ More",f"add_wrp_{_cid() or 0}"),B("‹ Back",f"wrp_{_cid() or 0}")]))
+        await update.message.reply_text(f"✅ `{old}` → `{txt}`",parse_mode="Markdown",reply_markup=KB([B("➕ More",f"add_wrp_{cid or 0}"),B("‹ Back",f"wrp_{cid or 0}")]))
 
     elif st in (ST_WL,ST_BL):
-        ft=TEMP.get(uid,{}).get('ft','whitelist'); f_add(_cid(),uid,ft,txt)
+        cid=_cid(); ft=TEMP.get(uid,{}).get('ft','whitelist')
+        f_add(cid,uid,ft,txt)
+        await _del_prompt(); await _del_user()
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
         icon="✅" if ft=='whitelist' else "🚫"
-        await update.message.reply_text(f"{icon} `{txt}`",parse_mode="Markdown",reply_markup=KB([B("➕ More",f"add_{'wl' if ft=='whitelist' else 'bl'}_{_cid() or 0}"),B("‹ Back",f"flt_{_cid() or 0}")]))
+        await update.message.reply_text(f"{icon} `{txt}`",parse_mode="Markdown",reply_markup=KB([B("➕ More",f"add_{'wl' if ft=='whitelist' else 'bl'}_{cid or 0}"),B("‹ Back",f"flt_{cid or 0}")]))
 
     elif st==ST_DLY:
-        try: v=max(0,min(3600,int(txt))); ch_upd(_cid(),delay_sec=v); await update.message.reply_text(f"✅ Delay: {v}s",reply_markup=KB([B("‹ Back",f"ctrl_{_cid() or 0}")]))
+        cid=_cid()
+        try:
+            v=max(0,min(3600,int(txt))); ch_upd(cid,delay_sec=v)
+            await _del_prompt(); await _del_user()
+            await update.message.reply_text(f"✅ Delay: {v}s",reply_markup=KB([B("‹ Back",f"ctrl_{cid or 0}")]))
         except: await update.message.reply_text("❌ Number (0-3600) bhejo!")
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
 
     elif st==ST_HDR:
-        ch_upd(_cid(),header="" if txt=="-" else txt); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ Header {'cleared' if txt=='-' else 'set'}!",reply_markup=KB([B("‹ Back",f"ctrl_{_cid() or 0}")]))
+        cid=_cid(); ch_upd(cid,header="" if txt=="-" else txt)
+        await _del_prompt(); await _del_user()
+        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        await update.message.reply_text(f"✅ Header {'cleared' if txt==chr(45) else 'set'}!",reply_markup=KB([B("‹ Back",f"ctrl_{cid or 0}")]))
 
     elif st==ST_FTR:
-        ch_upd(_cid(),footer="" if txt=="-" else txt); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ Footer {'cleared' if txt=='-' else 'set'}!",reply_markup=KB([B("‹ Back",f"ctrl_{_cid() or 0}")]))
+        cid=_cid(); ch_upd(cid,footer="" if txt=="-" else txt)
+        await _del_prompt(); await _del_user()
+        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        await update.message.reply_text(f"✅ Footer {'cleared' if txt==chr(45) else 'set'}!",reply_markup=KB([B("‹ Back",f"ctrl_{cid or 0}")]))
 
     elif st==ST_AIP:
-        ch_upd(_cid(),ai_prompt=txt,ai_style='custom',ai_on=1)
+        cid=_cid(); ch_upd(cid,ai_prompt=txt,ai_style='custom',ai_on=1)
+        await _del_prompt(); await _del_user()
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text("✅ Custom AI saved! 🤖",reply_markup=KB([B("🧪 Test",f"ai_t_{_cid() or 0}"),B("‹ Back",f"ai_{_cid() or 0}")]))
+        await update.message.reply_text("✅ Custom AI saved! 🤖",reply_markup=KB([B("🧪 Test",f"ai_t_{cid or 0}"),B("‹ Back",f"ai_{cid or 0}")]))
 
     elif st==ST_AIT:
         cid=_cid(); ch=ch_get(cid) if cid else None
+        await _del_prompt(); await _del_user()
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
         if not ch: await update.message.reply_text("❌ Channel not found."); return
         await update.message.reply_text("⏳ AI rewriting...")
         result=await ai_rewrite(txt,ch)
         style=AI_STYLES.get(ch.get('ai_style','none'),('?','?'))
         await update.message.reply_text(
-            f"🤖 AI Test ({style[0]})\n\n"
-            f"📥 Original:\n{txt[:200]}\n\n"
-            f"📤 Rewritten:\n{result[:500]}",
-            reply_markup=KB([B("⚙️ Change Style",f"ai_{cid}"),B("🏠 Home","main")])
+            f"🤖 AI Test ({style[0]})\n\n📥 Original:\n{txt[:200]}\n\n📤 Rewritten:\n{result[:500]}",
+            reply_markup=KB([B("⚙️ Style",f"ai_{cid}"),B("🏠 Home","main")])
         )
 
     elif st==ST_BC:
