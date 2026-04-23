@@ -18,7 +18,7 @@ BOT_TOKEN     = "8336442095:AAF6doNdq6Hdr3kUGrZH0hdOge8eDIt0G2U"
 ADMIN_IDS     = [8660435467]
 ADMIN_USERNAME = "@Shaan_Malik_Official"
 CLAUDE_KEY    = "your-anthropic-key"  # optional AI key
-BOT_NAME      = "Forward Pro"
+BOT_NAME      = "Advanced Forward Bot"
 BOT_VERSION   = "v7.0"
 TRIAL_DAYS    = 7
 QR_TIMEOUT    = 30    # 30 seconds QR validity
@@ -43,7 +43,12 @@ if sys.platform == "win32":
 from telegram import Update, InlineKeyboardButton as IB, InlineKeyboardMarkup as IM, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from telethon import TelegramClient, events
-from telethon.tl.types import Channel, Chat, MessageMediaWebPage
+from telethon.tl.types import (
+    Channel, Chat, MessageMediaWebPage,
+    MessageMediaPhoto, MessageMediaDocument,
+    DocumentAttributeSticker, DocumentAttributeVideo,
+    DocumentAttributeAnimated,
+)
 from telethon.sessions import StringSession
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
@@ -441,38 +446,42 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
 
         sil = bool(ch.get('silent'))
 
-        # Detect WebPage media (link preview card) — never forward these
+        # ── DETECT MEDIA TYPE ─────────────────────────────────────
         is_webpage = isinstance(getattr(msg, 'media', None), MessageMediaWebPage)
         real_media = bool(msg.media and not is_webpage)
 
+        # Detect sticker (don't add caption to stickers)
+        is_sticker = False
+        is_gif = False
+        if real_media and isinstance(msg.media, MessageMediaDocument):
+            doc = msg.media.document
+            if doc and hasattr(doc, 'attributes'):
+                for attr in doc.attributes:
+                    if isinstance(attr, DocumentAttributeSticker):
+                        is_sticker = True
+                    if isinstance(attr, DocumentAttributeAnimated):
+                        is_gif = True
+
         if ch.get('copy_mode'):
             if real_media:
+                # Stickers and GIFs — no caption, send as-is
+                cap = None if (is_sticker or is_gif) else (raw or None)
                 try:
-                    # Use send_file with the full message object — handles all media types
-                    # (photo, video, document, sticker, gif, voice, audio etc.)
                     s = await cl.send_file(
                         did,
-                        file=msg,           # pass entire message, not just media
-                        caption=raw or None,
+                        file=msg.media,
+                        caption=cap,
                         silent=sil,
                         buttons=None,
                         reply_to=reply_to_msg_id,
                         force_document=False,
                     )
                 except Exception as e1:
-                    LOG.warning(f"send_file msg failed ({e1}), trying media...")
+                    LOG.warning(f"send_file failed ({e1}), trying forward...")
                     try:
-                        # Fallback: pass msg.media
-                        s = await cl.send_file(
-                            did,
-                            file=msg.media,
-                            caption=raw or None,
-                            silent=sil,
-                            buttons=None,
-                            reply_to=reply_to_msg_id,
-                        )
+                        s = await cl.forward_messages(did, msg)
                     except Exception as e2:
-                        LOG.error(f"send_file both failed: {e2}")
+                        LOG.error(f"forward failed: {e2}")
                         return None
             elif raw:
                 s = await cl.send_message(
@@ -484,8 +493,12 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
             else:
                 return None
         else:
-            # Forward mode — original format with source channel name
-            s = await cl.forward_messages(did, msg)
+            # Forward mode — shows source channel name
+            try:
+                s = await cl.forward_messages(did, msg)
+            except Exception as ef:
+                LOG.error(f"forward_messages failed: {ef}")
+                return None
 
         if ch.get('pin_msg') and s:
             try: await cl.pin_message(did, s, notify=not sil)
@@ -838,7 +851,24 @@ async def do_qr(update: Update, ctx):
     uid = update.effective_user.id
     msg = update.callback_query.message if update.callback_query else update.message
 
-    # Clean old
+    # ── Already logged in? Just show dashboard ──
+    if s_get(uid):
+        if uid not in ACL:
+            asyncio.create_task(eng_start(uid))
+        try:
+            await msg.reply_text(
+                f"✅ Already logged in!\n{u_sub_str(uid)}",
+                reply_markup=KB_MAIN(uid)
+            )
+        except:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(
+                    f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",
+                    reply_markup=KB_MAIN(uid)
+                )
+        return
+
+    # Clean old QR client
     old = QR_CL.pop(uid, None)
     if old:
         try: await old.disconnect()
