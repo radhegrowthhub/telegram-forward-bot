@@ -535,13 +535,28 @@ async def eng_start(uid):
                 ch = ch_get(_ch_stale['id'])
                 if not ch or not ch['enabled']: continue
                 if ch.get('dup_check') and l_dup(ch['id'],ev.message.id,str(ev.chat_id)): continue
-                txt=(ev.message.text or ev.message.caption or "").lower()
-                fils=f_get(ch['id'])
-                if any(f['val'].lower() in txt for f in fils if f['ftype']=='blacklist'): continue
-                wl=[f for f in fils if f['ftype']=='whitelist']
-                if wl and not any(f['val'].lower() in txt for f in wl): continue
-                if ch.get('media_only') and not ev.message.media: continue
-                if ch.get('text_only') and ev.message.media: continue
+
+                txt = (ev.message.text or ev.message.caption or "").lower()
+                has_media = bool(ev.message.media)
+
+                # Media Only / Text Only filter
+                if ch.get('media_only') and not has_media: continue
+                if ch.get('text_only') and has_media: continue
+
+                fils = f_get(ch['id'])
+
+                # Blacklist — skip if text contains blacklisted word
+                # (skip check if message is pure media with no text)
+                if txt:
+                    if any(f['val'].lower() in txt for f in fils if f['ftype']=='blacklist'):
+                        continue
+
+                # Whitelist — ONLY apply if message has text
+                # Pure media (no caption) always passes whitelist
+                wl = [f for f in fils if f['ftype']=='whitelist']
+                if wl and txt:
+                    if not any(f['val'].lower() in txt for f in wl):
+                        continue
                 repls=rp_get(ch['id']); dests=json.loads(ch['dests']); cnt=0
 
                 # ── REPLY CHAIN: check if source msg is replying to another msg ──
