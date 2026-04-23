@@ -199,11 +199,30 @@ def u_toggle_bot(uid,v): c=DB(); c.execute("UPDATE users SET bot_on=? WHERE uid=
 def u_bot_on(uid): u=u_get(uid); return bool(u and u['bot_on'])
 def u_inc(uid,n=1): c=DB(); c.execute("UPDATE users SET total_fwd=total_fwd+? WHERE uid=?",(n,uid)); c.commit(); c.close()
 
-def s_save(uid,s): c=DB(); c.execute("INSERT OR REPLACE INTO sessions VALUES(?,?)",(uid,s)); c.commit(); c.close()
+# In-memory session cache — avoids repeated DB hits & SQLite busy errors
+SESSION_CACHE: dict = {}
+
+def s_save(uid, s):
+    SESSION_CACHE[uid] = s  # cache first
+    c=DB(); c.execute("INSERT OR REPLACE INTO sessions VALUES(?,?)",(uid,s)); c.commit(); c.close()
+
 def s_get(uid):
-    c=DB(); r=c.execute("SELECT sess FROM sessions WHERE uid=?",(uid,)).fetchone(); c.close()
-    return r['sess'] if r else None
-def s_del(uid): c=DB(); c.execute("DELETE FROM sessions WHERE uid=?",(uid,)); c.commit(); c.close()
+    # Check memory cache first — fastest & most reliable
+    if uid in SESSION_CACHE:
+        return SESSION_CACHE[uid]
+    # Fallback to DB
+    try:
+        c=DB(); r=c.execute("SELECT sess FROM sessions WHERE uid=?",(uid,)).fetchone(); c.close()
+        if r:
+            SESSION_CACHE[uid] = r['sess']  # populate cache
+            return r['sess']
+    except Exception as e:
+        LOG.warning(f"s_get DB error uid={uid}: {e}")
+    return None
+
+def s_del(uid):
+    SESSION_CACHE.pop(uid, None)  # clear cache
+    c=DB(); c.execute("DELETE FROM sessions WHERE uid=?",(uid,)); c.commit(); c.close()
 
 # ── Channels ───────────────────────────────────────────────────
 def ch_add(uid,src_id,src_name,ch_name):
@@ -2073,6 +2092,18 @@ async def msg_hdl(update: Update, ctx):
 # ═══════════════════════════════════════════════════════════════
 async def post_init(app):
     db_init()
+
+    # Preload ALL sessions into memory cache at startup
+    try:
+        c = DB()
+        rows = c.execute("SELECT uid, sess FROM sessions").fetchall()
+        c.close()
+        for row in rows:
+            SESSION_CACHE[row['uid']] = row['sess']
+        LOG.info(f"✅ Loaded {len(SESSION_CACHE)} sessions into cache")
+    except Exception as e:
+        LOG.warning(f"Session preload error: {e}")
+
     await app.bot.set_my_commands([
         BotCommand("start",  "Open bot"),
         BotCommand("menu",   "Dashboard"),
