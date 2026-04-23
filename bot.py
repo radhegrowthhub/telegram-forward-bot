@@ -14,7 +14,7 @@ SETUP:
 # ═══════════════════════════════════════════════════════════════
 API_ID        = 29770180
 API_HASH      = "e4452a45c8d4c9d0d7250f8017033472"
-BOT_TOKEN     = "8721421757:AAFd3tkPun61GToSq_T5vynM1YeVtpPpFoo"
+BOT_TOKEN     = "8336442095:AAF6doNdq6Hdr3kUGrZH0hdOge8eDIt0G2U"
 ADMIN_IDS     = [8660435467]           # ← SIRF aapka Telegram ID — bot owner only
 ADMIN_USERNAME = "@Shaan_Malik_Dubai"  # ← admin contact
 CLAUDE_KEY    = "your-anthropic-key"  # optional AI key
