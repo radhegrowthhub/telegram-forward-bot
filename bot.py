@@ -1118,23 +1118,23 @@ TEMP: dict = {}
 # ═══════════════════════════════════════════════════════════════
 async def cmd_start(u: Update, ctx):
     uid = u.effective_user.id
-    # Admin — no login needed
     if uid in ADMIN_IDS:
         await u.message.reply_text("🔧 Admin Panel", reply_markup=KB_ADM()); return
 
-    sess = s_get(uid)
-    if sess:
-        # Session exists — make sure engine is running
-        if uid not in ACL:
+    # Memory only check
+    in_cache = uid in SESSION_CACHE
+    in_acl   = uid in ACL
+
+    if in_cache or in_acl:
+        # Start engine if not running
+        if in_cache and not in_acl:
             asyncio.create_task(eng_start(uid))
-        # Make sure user exists in DB
         u_upsert(uid, u.effective_user.username or "", u.effective_user.first_name or "")
         await u.message.reply_text(
             f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",
             reply_markup=KB_MAIN(uid))
         return
 
-    # Not logged in — show welcome screen
     await u.message.reply_text(
         f"⚡ {BOT_NAME} — Pro Forwarder\n\n"
         f"📡 Auto channel detect\n"
@@ -1187,16 +1187,15 @@ async def cbk(update: Update, ctx):
 
     # ── ADMIN (no session needed) ──
     is_admin = uid in ADMIN_IDS
-    is_admin_cb = is_admin and (d in ("main","adm") or d.startswith("a_"))
-    if is_admin_cb:
+    if is_admin and (d in ("main","adm") or d.startswith("a_")):
         await _admin_cbk(d, uid, q, ctx, ED, ANS); return
 
-    # ── SESSION CHECK ──
-    # Check memory cache first (fastest), then ACL (engine running = logged in)
-    sess = s_get(uid)
-    logged_in = bool(sess) or (uid in ACL)
+    # ── SESSION CHECK (memory only — no DB hit) ──
+    in_cache = uid in SESSION_CACHE          # session saved in RAM
+    in_acl   = uid in ACL                    # engine currently running
+    logged_in = in_cache or in_acl or is_admin
 
-    if not logged_in and not is_admin:
+    if not logged_in:
         try:
             await q.edit_message_text(
                 f"⚡ {BOT_NAME}\n\nLogin karo:",
@@ -1209,8 +1208,8 @@ async def cbk(update: Update, ctx):
             )
         return
 
-    # If session exists but engine not running — auto-start
-    if sess and uid not in ACL and not is_admin:
+    # Session exists but engine not running — auto-start silently
+    if in_cache and not in_acl and not is_admin:
         asyncio.create_task(eng_start(uid))
 
     # ── MAIN ──
