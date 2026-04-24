@@ -548,22 +548,33 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
         LOG.error(f"FWD→{did}: {e}"); return None
 
 async def eng_start(uid):
-    sess=s_get(uid)
+    sess = s_get(uid)
     if not sess: return False
     await eng_stop(uid)
     try:
-        cl=TelegramClient(StringSession(sess),API_ID,API_HASH)
+        cl = TelegramClient(StringSession(sess), API_ID, API_HASH)
         await cl.connect()
-        if not await cl.is_user_authorized(): return False
-        ACL[uid]=cl
-        chs=ch_all(uid)
+
+        # Check auth — if expired, clear session so user re-logins cleanly
+        if not await cl.is_user_authorized():
+            LOG.warning(f"Session expired uid={uid} — clearing")
+            s_del(uid)
+            await cl.disconnect()
+            return False
+
+        # ✅ Save fresh session after every connect (keeps session alive)
+        fresh_sess = cl.session.save()
+        s_save(uid, fresh_sess)
+
+        ACL[uid] = cl
+        chs = ch_all(uid)
         if not chs: return True
-        sm={}
+        sm = {}
         for ch in chs:
             if not ch['enabled']: continue
-            try: k=int(ch['src_id'])
-            except: k=ch['src_id']
-            sm.setdefault(k,[]).append(ch)
+            try: k = int(ch['src_id'])
+            except: k = ch['src_id']
+            sm.setdefault(k, []).append(ch)
         if not sm: return True
 
         @cl.on(events.NewMessage(chats=list(sm.keys())))
@@ -636,10 +647,33 @@ async def eng_start(uid):
                 if cnt: l_add(uid,ch['id'],ev.message.id,str(ev.chat_id)); u_inc(uid,cnt)
 
         async def runner():
-            try: await cl.run_until_disconnected()
-            except Exception as e:
-                LOG.warning(f"Engine uid={uid}: {e}")
-                await asyncio.sleep(8); await eng_start(uid)
+            retry = 0
+            while True:
+                try:
+                    await cl.run_until_disconnected()
+                    LOG.info(f"Engine uid={uid} disconnected normally")
+                    break
+                except Exception as e:
+                    retry += 1
+                    wait = min(5 * retry, 60)  # 5s, 10s, 15s... max 60s
+                    LOG.warning(f"Engine uid={uid} err (retry {retry}): {e} — wait {wait}s")
+                    await asyncio.sleep(wait)
+                    # Try to reconnect before full restart
+                    try:
+                        if cl.is_connected():
+                            continue
+                        await cl.connect()
+                        if await cl.is_user_authorized():
+                            # Save fresh session
+                            s_save(uid, cl.session.save())
+                            LOG.info(f"Engine uid={uid} reconnected OK")
+                            retry = 0
+                            continue
+                    except: pass
+                    # Full restart
+                    LOG.info(f"Engine uid={uid} full restart")
+                    await eng_start(uid)
+                    return
 
         TSK[uid]=asyncio.create_task(runner())
         LOG.info(f"✅ Engine uid={uid}")
