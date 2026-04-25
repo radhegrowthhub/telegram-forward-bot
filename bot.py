@@ -1243,13 +1243,16 @@ async def cmd_start(u: Update, ctx):
     if uid in ADMIN_IDS:
         await u.message.reply_text("🔧 Admin Panel", reply_markup=KB_ADM()); return
 
-    # Memory only check
-    in_cache = uid in SESSION_CACHE
-    in_acl   = uid in ACL
+    # Check cache first, then DB as fallback
+    sess = s_get(uid)  # checks cache + DB both
+    in_acl = uid in ACL
 
-    if in_cache or in_acl:
+    if sess or in_acl:
+        # Populate cache if missing
+        if sess and uid not in SESSION_CACHE:
+            SESSION_CACHE[uid] = sess
         # Start engine if not running
-        if in_cache and not in_acl:
+        if sess and not in_acl:
             asyncio.create_task(eng_start(uid))
         u_upsert(uid, u.effective_user.username or "", u.effective_user.first_name or "")
         await u.message.reply_text(
@@ -1260,7 +1263,6 @@ async def cmd_start(u: Update, ctx):
     await u.message.reply_text(
         f"⚡ {BOT_NAME} — Pro Forwarder\n\n"
         f"📡 Auto channel detect\n"
-        f"🤖 AI post rewriter\n"
         f"📋 Copy mode • 🔗 Replace\n"
         f"✂️ Filters • 📐 Format\n"
         f"🎁 {get_trial_days()} days free trial\n\n"
@@ -1312,10 +1314,13 @@ async def cbk(update: Update, ctx):
     if is_admin and (d in ("main","adm") or d.startswith("a_")):
         await _admin_cbk(d, uid, q, ctx, ED, ANS); return
 
-    # ── SESSION CHECK (memory only — no DB hit) ──
-    in_cache = uid in SESSION_CACHE          # session saved in RAM
-    in_acl   = uid in ACL                    # engine currently running
-    logged_in = in_cache or in_acl or is_admin
+    # ── SESSION CHECK ──
+    in_acl   = uid in ACL
+    sess     = s_get(uid)   # checks RAM cache + DB
+    # Populate cache if DB had it
+    if sess and uid not in SESSION_CACHE:
+        SESSION_CACHE[uid] = sess
+    logged_in = bool(sess) or in_acl or is_admin
 
     if not logged_in:
         try:
@@ -1331,7 +1336,7 @@ async def cbk(update: Update, ctx):
         return
 
     # Session exists but engine not running — auto-start silently
-    if in_cache and not in_acl and not is_admin:
+    if sess and not in_acl and not is_admin:
         asyncio.create_task(eng_start(uid))
 
     # ── MAIN ──
