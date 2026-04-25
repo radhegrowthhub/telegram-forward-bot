@@ -57,10 +57,24 @@ LOG = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 #   DATABASE
 # ═══════════════════════════════════════════════════════════════
+import threading
+_DB_LOCK = threading.Lock()
+_DB_CONN = None
+
 def DB():
-    c = sqlite3.connect(DB_PATH, check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    return c
+    global _DB_CONN
+    with _DB_LOCK:
+        try:
+            if _DB_CONN is None:
+                _DB_CONN = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
+                _DB_CONN.row_factory = sqlite3.Row
+                _DB_CONN.execute("PRAGMA journal_mode=WAL")
+                _DB_CONN.execute("PRAGMA synchronous=NORMAL")
+            return _DB_CONN
+        except:
+            _DB_CONN = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
+            _DB_CONN.row_factory = sqlite3.Row
+            return _DB_CONN
 
 def db_init():
     c = DB()
@@ -211,33 +225,35 @@ def s_save(uid, s):
     c=DB(); c.execute("INSERT OR REPLACE INTO sessions VALUES(?,?)",(uid,s)); c.commit(); c.close()
 
 def s_get(uid):
-    # 1. Engine running = definitely logged in
+    # 1. Engine running = 100% logged in
     if uid in ACL:
-        # Try to get session string from cache/DB but don't block
-        if uid in SESSION_CACHE:
-            return SESSION_CACHE[uid]
-        try:
-            c=DB(); r=c.execute("SELECT sess FROM sessions WHERE uid=?",(uid,)).fetchone(); c.close()
-            if r:
-                SESSION_CACHE[uid] = r['sess']
-                return r['sess']
-        except: pass
-        return "ACL_ACTIVE"  # special marker — engine is running
-    # 2. Memory cache
+        return SESSION_CACHE.get(uid, "ACL_ACTIVE")
+    # 2. Memory cache — instant
     if uid in SESSION_CACHE:
         return SESSION_CACHE[uid]
-    # 3. DB fallback with retry
+    # 3. DB with retry
     for attempt in range(3):
         try:
-            c=DB(); r=c.execute("SELECT sess FROM sessions WHERE uid=?",(uid,)).fetchone(); c.close()
+            with _DB_LOCK:
+                r = _get_conn().execute(
+                    "SELECT sess FROM sessions WHERE uid=?", (uid,)
+                ).fetchone()
             if r:
                 SESSION_CACHE[uid] = r['sess']
                 return r['sess']
             return None
         except Exception as e:
             LOG.warning(f"s_get retry {attempt} uid={uid}: {e}")
-            import time; time.sleep(0.1)
+            import time as _t; _t.sleep(0.2)
     return None
+
+def _get_conn():
+    global _DB_CONN
+    if _DB_CONN is None:
+        _DB_CONN = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15)
+        _DB_CONN.row_factory = sqlite3.Row
+        _DB_CONN.execute("PRAGMA journal_mode=WAL")
+    return _DB_CONN
 
 def s_del(uid):
     SESSION_CACHE.pop(uid, None)  # clear cache
@@ -665,10 +681,22 @@ async def eng_start(uid):
         await cl.connect()
 
         if not await cl.is_user_authorized():
-            LOG.warning(f"Session expired uid={uid}")
-            s_del(uid)
-            await cl.disconnect()
-            return False
+            # Don't delete session on temp failure — try reconnecting first
+            LOG.warning(f"Auth check failed uid={uid} — retrying in 5s")
+            await asyncio.sleep(5)
+            try:
+                await cl.connect()
+                if await cl.is_user_authorized():
+                    LOG.info(f"Auth recovered uid={uid}")
+                else:
+                    LOG.warning(f"Session truly expired uid={uid}")
+                    s_del(uid)
+                    await cl.disconnect()
+                    return False
+            except:
+                LOG.warning(f"Retry failed uid={uid} — keeping session, will retry later")
+                await cl.disconnect()
+                return False
 
         # Save fresh session immediately after connect
         s_save(uid, cl.session.save())
