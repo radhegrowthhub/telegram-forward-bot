@@ -59,22 +59,12 @@ LOG = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 import threading
 _DB_LOCK = threading.Lock()
-_DB_CONN = None
 
 def DB():
-    global _DB_CONN
-    with _DB_LOCK:
-        try:
-            if _DB_CONN is None:
-                _DB_CONN = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
-                _DB_CONN.row_factory = sqlite3.Row
-                _DB_CONN.execute("PRAGMA journal_mode=WAL")
-                _DB_CONN.execute("PRAGMA synchronous=NORMAL")
-            return _DB_CONN
-        except:
-            _DB_CONN = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
-            _DB_CONN.row_factory = sqlite3.Row
-            return _DB_CONN
+    c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    return c
 
 def db_init():
     c = DB()
@@ -234,10 +224,9 @@ def s_get(uid):
     # 3. DB with retry
     for attempt in range(3):
         try:
-            with _DB_LOCK:
-                r = _get_conn().execute(
-                    "SELECT sess FROM sessions WHERE uid=?", (uid,)
-                ).fetchone()
+            c = DB()
+            r = c.execute("SELECT sess FROM sessions WHERE uid=?", (uid,)).fetchone()
+            c.close()
             if r:
                 SESSION_CACHE[uid] = r['sess']
                 return r['sess']
@@ -246,14 +235,6 @@ def s_get(uid):
             LOG.warning(f"s_get retry {attempt} uid={uid}: {e}")
             import time as _t; _t.sleep(0.2)
     return None
-
-def _get_conn():
-    global _DB_CONN
-    if _DB_CONN is None:
-        _DB_CONN = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15)
-        _DB_CONN.row_factory = sqlite3.Row
-        _DB_CONN.execute("PRAGMA journal_mode=WAL")
-    return _DB_CONN
 
 def s_del(uid):
     SESSION_CACHE.pop(uid, None)  # clear cache
