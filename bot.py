@@ -107,6 +107,10 @@ def db_init():
     # Migration — add new columns if not exist
     for col, default in [
         ("block_at","0"), ("block_www","0"),
+        ("block_all_links","0"), ("block_tme","0"),
+        ("free_style","'none'"),
+        ("emoji_str","''"),
+        ("emoji_pos","'off'"),
         ("block_tme","0"), ("block_all_links","0")
     ]:
         try:
@@ -369,9 +373,86 @@ AI_STYLES = {
     "custom":    ("✏️ Custom",    "My custom AI prompt"),
 }
 
+# ── FREE TEXT STYLES (No API key needed) ───────────────────────
+FREE_STYLES = {
+    "fs_none":    ("❌ Off",          None),
+    "fs_bold":    ("𝗕𝗼𝗹𝗱",           "bold"),
+    "fs_italic":  ("𝘐𝘵𝘢𝘭𝘪𝘤",         "italic"),
+    "fs_caps":    ("CAPS LOCK",       "caps"),
+    "fs_lower":   ("lowercase",       "lower"),
+    "fs_title":   ("Title Case",      "title"),
+    "fs_clean":   ("🧹 Clean Spaces", "clean"),
+    "fs_lines":   ("📋 Each Line ▪️", "lines"),
+    "fs_mono":    ("`Monospace`",     "mono"),
+}
+
+# Emoji positions
+EMOJI_POS = {
+    "off":    "❌ Off",
+    "start":  "▶️ Message Start",
+    "end":    "◀️ Message End",
+    "both":   "↔️ Start + End",
+    "lines":  "📋 Every Line Start",
+}
+
+def apply_free_style(text, style):
+    """Apply text formatting without any API key."""
+    if not text or not style or style == "none": return text
+    lines = text.split('\n')
+    if style == "bold":
+        return '\n'.join(f"**{l}**" if l.strip() else l for l in lines)
+    elif style == "italic":
+        return '\n'.join(f"__{l}__" if l.strip() else l for l in lines)
+    elif style == "caps":
+        return text.upper()
+    elif style == "lower":
+        return text.lower()
+    elif style == "title":
+        return '\n'.join(l.title() for l in lines)
+    elif style == "clean":
+        text = re.sub(r' {2,}', ' ', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text.strip()
+    elif style == "lines":
+        return '\n'.join(f"▪️ {l}" if l.strip() else l for l in lines)
+    elif style == "mono":
+        return f"`{text}`"
+    return text
+
+def apply_emoji(text, emoji_str, position):
+    """Add custom emoji to message."""
+    if not text or not emoji_str or position == "off": return text
+    e = emoji_str.strip()
+    if not e: return text
+    if position == "start":
+        return f"{e} {text}"
+    elif position == "end":
+        return f"{text} {e}"
+    elif position == "both":
+        return f"{e} {text} {e}"
+    elif position == "lines":
+        lines = text.split('\n')
+        return '\n'.join(f"{e} {l}" if l.strip() else l for l in lines)
+    return text
+
 async def ai_rewrite(text, ch):
-    if not text or ch.get('ai_style','none')=='none': return text
-    style = ch.get('ai_style','none'); prompt = ch.get('ai_prompt','')
+    if not text: return text
+
+    # ── FREE style ──
+    fs = ch.get('free_style', 'none')
+    if fs and fs != 'none':
+        text = apply_free_style(text, FREE_STYLES.get(fs, (None,None))[1])
+
+    # ── Emoji ──
+    emoji_str = ch.get('emoji_str', '')
+    emoji_pos = ch.get('emoji_pos', 'off')
+    if emoji_str and emoji_pos != 'off':
+        text = apply_emoji(text, emoji_str, emoji_pos)
+
+    # ── AI rewrite (needs API key) ──
+    style = ch.get('ai_style', 'none')
+    if style == 'none' or not ch.get('ai_on'): return text
+    prompt = ch.get('ai_prompt', '')
     system = prompt if (style=='custom' and prompt) else (
         f"Rewrite as: {AI_STYLES.get(style,('',''))[1]}. "
         "Keep core info. Match original language. Return ONLY rewritten text."
@@ -450,7 +531,12 @@ async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
         if doing_block:
             raw = _strip(raw, b_all, b_www, b_tme, b_at)
 
-        if ch.get('ai_on'): raw = await ai_rewrite(raw, ch)
+        needs_transform = (
+            ch.get('free_style','none') != 'none' or
+            (ch.get('emoji_str','') and ch.get('emoji_pos','off') != 'off')
+        )
+        if needs_transform:
+            raw = await ai_rewrite(raw, ch)
         if ch.get('fmt_clean'): raw = re.sub(r'\n{3,}','\n\n',raw).strip()
         if ch.get('fmt_bold'):
             ls=raw.split('\n')
@@ -646,31 +732,53 @@ async def eng_start(uid):
                     if ch.get('delay_sec',0)>0: await asyncio.sleep(ch['delay_sec'])
                 if cnt: l_add(uid,ch['id'],ev.message.id,str(ev.chat_id)); u_inc(uid,cnt)
 
+        async def keep_alive():
+            """Refresh session every 6 hours to prevent Telegram logout."""
+            while True:
+                try:
+                    await asyncio.sleep(3 * 3600)  # 3 hours
+                    if uid not in ACL: break
+                    cl2 = ACL.get(uid)
+                    if cl2 and cl2.is_connected():
+                        if await cl2.is_user_authorized():
+                            fresh = cl2.session.save()
+                            s_save(uid, fresh)
+                            LOG.info(f"✅ Session refreshed uid={uid}")
+                        else:
+                            LOG.warning(f"Session invalid uid={uid} — restarting")
+                            await eng_start(uid)
+                            break
+                    else:
+                        await eng_start(uid)
+                        break
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    LOG.warning(f"keep_alive uid={uid}: {e}")
+
+        asyncio.create_task(keep_alive())
+
         async def runner():
             retry = 0
             while True:
                 try:
                     await cl.run_until_disconnected()
-                    LOG.info(f"Engine uid={uid} disconnected normally")
+                    LOG.info(f"Engine uid={uid} disconnected")
                     break
                 except Exception as e:
                     retry += 1
-                    wait = min(5 * retry, 60)  # 5s, 10s, 15s... max 60s
+                    wait = min(5 * retry, 60)
                     LOG.warning(f"Engine uid={uid} err (retry {retry}): {e} — wait {wait}s")
                     await asyncio.sleep(wait)
-                    # Try to reconnect before full restart
                     try:
-                        if cl.is_connected():
-                            continue
-                        await cl.connect()
+                        if not cl.is_connected():
+                            await cl.connect()
                         if await cl.is_user_authorized():
-                            # Save fresh session
                             s_save(uid, cl.session.save())
-                            LOG.info(f"Engine uid={uid} reconnected OK")
                             retry = 0
+                            LOG.info(f"✅ Engine uid={uid} reconnected")
                             continue
                     except: pass
-                    # Full restart
                     LOG.info(f"Engine uid={uid} full restart")
                     await eng_start(uid)
                     return
@@ -708,7 +816,7 @@ def KB_MAIN(uid):
     return IM([
         [B(f"{'🟢 Running' if on and eng else '🔴 Paused'}  •  {BOT_NAME}","noop")],
         [B("📡 Channels","chs"),         B("⚙️ Settings","ctrl_g")],
-        [B("🤖 AI Rewrite","ai_g"),      B("🔄 Replace","repl_g")],
+        [B("✨ Text Style","ai_g"),      B("🔄 Replace","repl_g")],
         [B("📊 Stats","stats"),           B("💳 Subscription","sub")],
         [B(f"{OO(on)} Bot","bot_tog"),   B(f"{'⚡ Engine' if eng else '⛔ Engine'}","eng_r")],
         [B("🆘 Support","support"),       B("🚪 Logout","logout")],
@@ -774,7 +882,7 @@ def KB_CH(cid):
     return IM([
         [B(f"{'🟢' if ch['enabled'] else '🔴'} {ch['ch_name'][:28]}",f"ch_tog_{cid}")],
         [B(f"📤 {len(dests)} dest",f"dests_{cid}"),  B("⚙️ Control",f"ctrl_{cid}")],
-        [B("🤖 AI",f"ai_{cid}"),                     B("🔄 Replace",f"repls_{cid}")],
+        [B("✨ Style",f"ai_{cid}"),                     B("🔄 Replace",f"repls_{cid}")],
         [B("✂️ Filters",f"flt_{cid}"),                B("📐 Format",f"fmt_{cid}")],
         [B(f"{'🔴 Links Blocked' if ball else '⚪ Block Links'}",f"t_ball_{cid}"),
          B(f"{'🔴 @User Blocked' if bat  else '⚪ Block @User'}",f"t_bat_{cid}")],
@@ -804,7 +912,7 @@ def KB_CTRL(cid):
         [B("── QUICK BLOCK ──","noop")],
         [B(f"{'🔴 Block ALL Links  ON' if ball else '⚪ Block ALL Links  OFF'}",f"t_ball_{cid}")],
         [B(f"{'🔴 Block @Username  ON' if bat  else '⚪ Block @Username  OFF'}",f"t_bat_{cid}")],
-        [B("🤖 AI",f"ai_{cid}"),  B("🔄 Replace",f"repls_{cid}"),  B("✂️ Filters",f"flt_{cid}")],
+        [B("✨ Style",f"ai_{cid}"),  B("🔄 Replace",f"repls_{cid}"),  B("✂️ Filters",f"flt_{cid}")],
         [B("‹ Back",f"ch_{cid}"), B("🏠 Home","main")],
     ])
 
@@ -817,26 +925,52 @@ def KB_CTRL_G(uid):
         [B("📡 Channels","chs"), B("‹ Back","main")],
     ])
 
-# ── AI ─────────────────────────────────────────────────────────
+# ── TEXT STYLE ─────────────────────────────────────────────────
 def KB_AI(cid):
-    ch=ch_get(cid); cur=ch.get('ai_style','none')
-    rows=[[B(f"🤖 AI  •  {ch['ch_name'][:22]}","noop")],
-          [B(f"Power: {OO(ch['ai_on'])} {'ON — '+AI_STYLES.get(cur,('?',))[0] if ch['ai_on'] else 'OFF'}",f"t_ai_{cid}")]]
-    for k,(label,_) in AI_STYLES.items():
-        mark="✅ " if cur==k else ""
-        rows.append([B(f"{mark}{label}",f"ai_s_{cid}_{k}")])
-    rows.append([B(f"✏️ Custom {'✅' if ch.get('ai_prompt') else '—'}",f"ai_cp_{cid}"),
-                 B("🧪 Test",f"ai_t_{cid}")])
+    ch  = ch_get(cid)
+    fs  = ch.get('free_style','none')
+    ep  = ch.get('emoji_pos','off')
+    es  = ch.get('emoji_str','') or '—'
+    rows = [
+        [B(f"✨ Text Style  •  {ch['ch_name'][:22]}","noop")],
+        # ── Text Format ──
+        [B("── 📝 Text Format ──","noop")],
+    ]
+    for k,(label,_) in FREE_STYLES.items():
+        tick = "✅ " if fs==k else ""
+        rows.append([B(f"{tick}{label}", f"fs_set_{cid}_{k}")])
+    # ── Emoji ──
+    rows.append([B("── 😊 Emoji Settings ──","noop")])
+    rows.append([B(f"Emoji: {es}  (tap to set)",f"emoji_set_{cid}")])
+    rows.append([B("── Position ──","noop")])
+    for pk, plabel in EMOJI_POS.items():
+        tick = "✅ " if ep==pk else ""
+        rows.append([B(f"{tick}{plabel}", f"emoji_pos_{cid}_{pk}")])
+    rows.append([B("🗑 Clear Emoji",f"emoji_clr_{cid}")])
     rows.append([B("‹ Back",f"ch_{cid}"), B("🏠 Home","main")])
     return IM(rows)
 
 def KB_AI_G(uid):
-    chs=ch_all(uid); rows=[[B("🤖 AI — Select Channel","noop")]]
+    chs = ch_all(uid)
+    rows = [
+        [B("✨ Text Style","noop")],
+        [B("🌐 Change ALL Channels Style","ai_g_all")],
+        [B("─── Individual Channels ───","noop")],
+    ]
     for ch in chs:
-        st=AI_STYLES.get(ch.get('ai_style','none'),('❌',))[0]
-        rows.append([B(f"{'🤖' if ch['ai_on'] else '○'} {ch['ch_name'][:22]} — {st}",f"ai_{ch['id']}")])
-    if not chs: rows.append([B("No channels!","ch_new")])
+        fs = ch.get('free_style','none')
+        label = FREE_STYLES.get(fs,("❌ Off",))[0]
+        rows.append([B(f"{ch['ch_name'][:24]} — {label}", f"ai_{ch['id']}")])
+    if not chs: rows.append([B("No channels — Add first","ch_new")])
     rows.append([B("‹ Back","main")])
+    return IM(rows)
+
+def KB_AI_GLOBAL(uid):
+    """Style picker for ALL channels at once"""
+    rows = [[B("🌐 Change ALL Channels Style","noop")]]
+    for k,(label,_) in FREE_STYLES.items():
+        rows.append([B(label, f"ai_g_set_{k}")])
+    rows.append([B("‹ Back","ai_g")])
     return IM(rows)
 
 # ── REPLACEMENTS ───────────────────────────────────────────────
@@ -1111,7 +1245,7 @@ TEMP: dict = {}
 (ST_LO,ST_LN,ST_WO,ST_WN,ST_WL,ST_BL,
  ST_HDR,ST_FTR,ST_DLY,ST_AIP,ST_AIT,
  ST_REN,ST_BC,ST_GID,ST_GDY,ST_SRCH,
- ST_PLAN_PRICE,ST_PLAN_DAYS,ST_PLAN_NEW,ST_TRIAL) = range(20)
+ ST_PLAN_PRICE,ST_PLAN_DAYS,ST_PLAN_NEW,ST_TRIAL,ST_EMOJI) = range(21)
 
 # ═══════════════════════════════════════════════════════════════
 #   COMMANDS
@@ -1678,7 +1812,53 @@ async def cbk(update: Update, ctx):
     # ── AI ──
     elif d == "ai_g": await ED("🤖 AI Settings",KB_AI_G(uid))
     elif d.startswith("ai_") and d[3:].isdigit(): cid=int(d[3:]); await ED("🤖 AI",KB_AI(cid))
-    elif d.startswith("t_ai_"):     cid=int(d[5:]); ch=ch_get(cid); ch_upd(cid,ai_on=0 if ch['ai_on'] else 1); await ED("🤖",KB_AI(cid))
+    elif d.startswith("t_ai_"):
+        cid=int(d[5:]); ch=ch_get(cid); ch_upd(cid,ai_on=0 if ch['ai_on'] else 1); await ED("🤖",KB_AI(cid))
+
+    elif d.startswith("fs_set_"):
+        rest = d[7:]
+        parts = rest.split('_')
+        cid = int(parts[0])
+        style_key = '_'.join(parts[1:])
+        ch_upd(cid, free_style=style_key)
+        label = FREE_STYLES.get(style_key, ("?",))[0]
+        await ANS(f"✅ {label}", True)
+        await ED("✨ Style", KB_AI(cid))
+
+    elif d.startswith("emoji_set_"):
+        cid = int(d[10:])
+        TEMP[uid] = {'cid': cid}; ctx.user_data['st'] = ST_EMOJI
+        m = await q.message.reply_text(
+            "😊 Emoji bhejo jo messages mein add karna hai:\n\n"
+            "Example: 🔥  ya  ✅  ya  📊🔥\n\n/cancel"
+        )
+        TEMP[uid]['prompt_id'] = m.message_id
+
+    elif d.startswith("emoji_pos_"):
+        rest = d[10:]
+        idx = rest.index('_')
+        cid = int(rest[:idx]); pos = rest[idx+1:]
+        ch_upd(cid, emoji_pos=pos)
+        await ANS(f"✅ {EMOJI_POS.get(pos,'?')}", True)
+        await ED("✨ Style", KB_AI(cid))
+
+    elif d.startswith("emoji_clr_"):
+        cid = int(d[10:])
+        ch_upd(cid, emoji_str='', emoji_pos='off')
+        await ANS("🗑 Emoji cleared!", True)
+        await ED("✨ Style", KB_AI(cid))
+
+    elif d == "ai_g_all":
+        await ED("🌐 Change ALL Channels Style", KB_AI_GLOBAL(uid))
+
+    elif d.startswith("ai_g_set_"):
+        style = d[9:]
+        chs = ch_all(uid)
+        for ch in chs:
+            ch_upd(ch['id'], free_style=style)
+        label = FREE_STYLES.get(style, ('?',))[0]
+        await ANS(f"✅ {len(chs)} channels → {label}", True)
+        await ED("✨ Text Style", KB_AI_G(uid))
     elif d.startswith("ai_s_"):
         parts=d.split("_"); cid=int(parts[2]); style="_".join(parts[3:])
         ch_upd(cid,ai_style=style); (ch_upd(cid,ai_on=1) if style!='none' else None)
@@ -2086,11 +2266,24 @@ async def msg_hdl(update: Update, ctx):
             days = max(0, int(txt))
             setting_set('trial_days', days)
             await update.message.reply_text(
-                f"✅ Trial updated: {days} days\n\nNaye users ko {days} days trial milega.",
+                f"✅ Trial updated: {days} days",
                 reply_markup=KB([B("💳 Plans","a_plans"), B("‹ Admin","adm")])
             )
         except:
             await update.message.reply_text("❌ Number bhejo! e.g. 7")
+
+    elif st==ST_EMOJI:
+        cid = TEMP.get(uid,{}).get('cid')
+        await _del_prompt(); await _del_user()
+        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        if cid:
+            ch_upd(cid, emoji_str=txt.strip(), emoji_pos='start')
+            await update.message.reply_text(
+                f"✅ Emoji set: {txt.strip()}\n\nAb position choose karo:",
+                reply_markup=KB_AI(cid)
+            )
+        else:
+            await update.message.reply_text("❌ Error, try again.")
 
     elif st==ST_PLAN_PRICE:
         if uid not in ADMIN_IDS: return
