@@ -209,6 +209,7 @@ def u_inc(uid,n=1): c=DB(); c.execute("UPDATE users SET total_fwd=total_fwd+? WH
 
 # In-memory session cache — avoids repeated DB hits & SQLite busy errors
 SESSION_CACHE: dict = {}
+KNOWN_USERS:   set  = set()  # users who have ever logged in this session
 
 def s_save(uid, s):
     SESSION_CACHE[uid] = s  # cache first
@@ -695,107 +696,87 @@ async def eng_start(uid):
 
         @cl.on(events.NewMessage(chats=list(sm.keys())))
         async def handler(ev):
-            if not u_bot_on(uid) or not u_ok(uid): return
-            matched = sm.get(ev.chat_id,[]) or sm.get(str(ev.chat_id),[])
-            for _ch_stale in matched:
-                ch = ch_get(_ch_stale['id'])
-                if not ch or not ch['enabled']: continue
-                if ch.get('dup_check') and l_dup(ch['id'],ev.message.id,str(ev.chat_id)): continue
-
-                txt = (ev.message.text or "").lower()
-
-                # Real media = photo/video/sticker etc (NOT webpage preview)
-                has_real_media = (
-                    bool(ev.message.media) and
-                    not isinstance(ev.message.media, MessageMediaWebPage)
-                )
-                has_text = bool(ev.message.text)
-
-                LOG.info(f"MSG uid={uid} ch={ch['id']} media={has_real_media} txt_len={len(txt)}")
-
-                # Media Only / Text Only filter
-                if ch.get('media_only') and not has_real_media: continue
-                if ch.get('text_only') and has_real_media: continue
-
-                # ── TEXT FILTERS (Whitelist/Blacklist) ──────────────
-                # Media messages (photos/videos/stickers) ALWAYS pass
-                # Filters only apply to pure TEXT messages (no media)
-                if not has_real_media:
-                    fils = f_get(ch['id'])
-                    # Blacklist
-                    if txt and any(f['val'].lower() in txt for f in fils if f['ftype']=='blacklist'):
-                        LOG.info(f"Blocked by blacklist uid={uid}")
-                        continue
-                    # Whitelist
-                    wl = [f for f in fils if f['ftype']=='whitelist']
-                    if wl and txt and not any(f['val'].lower() in txt for f in wl):
-                        LOG.info(f"Blocked by whitelist uid={uid}")
-                        continue
-                repls=rp_get(ch['id']); dests=json.loads(ch['dests']); cnt=0
-
-                # ── REPLY CHAIN: check if source msg is replying to another msg ──
-                src_reply_id = None
-                if ev.message.reply_to and hasattr(ev.message.reply_to, 'reply_to_msg_id'):
-                    src_reply_id = ev.message.reply_to.reply_to_msg_id
-
-                for d in dests:
-                    # Find mapped dest msg_id for the reply
-                    reply_to_in_dest = None
-                    if src_reply_id:
-                        rmap = REPLY_MAP.get(uid, {}).get(ch['id'], {}).get(d['id'], {})
-                        reply_to_in_dest = rmap.get(src_reply_id)
-
-                    r = await _fwd(cl, ev.message, d['id'], ch, repls,
-                                   reply_to_msg_id=reply_to_in_dest)
-                    if r:
-                        cnt += 1
-                        # Save mapping: src_msg_id → dest_msg_id for future replies
-                        dest_id_str = str(d['id'])
-                        REPLY_MAP.setdefault(uid, {}).setdefault(ch['id'], {}).setdefault(dest_id_str, {})
-                        REPLY_MAP[uid][ch['id']][dest_id_str][ev.message.id] = r.id
-                        # Keep map small — only last 500 per channel-dest pair
-                        rmap = REPLY_MAP[uid][ch['id']][dest_id_str]
-                        if len(rmap) > 500:
-                            oldest = list(rmap.keys())[:100]
-                            for k in oldest: del rmap[k]
-
-                    if ch.get('delay_sec',0)>0: await asyncio.sleep(ch['delay_sec'])
-                if cnt: l_add(uid,ch['id'],ev.message.id,str(ev.chat_id)); u_inc(uid,cnt)
+            try:
+                if not u_bot_on(uid) or not u_ok(uid): return
+                matched = sm.get(ev.chat_id,[]) or sm.get(str(ev.chat_id),[])
+                for _ch_stale in matched:
+                    try:
+                        ch = ch_get(_ch_stale['id'])
+                        if not ch or not ch['enabled']: continue
+                        if ch.get('dup_check') and l_dup(ch['id'],ev.message.id,str(ev.chat_id)): continue
+                        txt = (ev.message.text or "").lower()
+                        has_real_media = (bool(ev.message.media) and not isinstance(ev.message.media, MessageMediaWebPage))
+                        if ch.get('media_only') and not has_real_media: continue
+                        if ch.get('text_only') and has_real_media: continue
+                        if not has_real_media:
+                            fils = f_get(ch['id'])
+                            if txt and any(f['val'].lower() in txt for f in fils if f['ftype']=='blacklist'): continue
+                            wl = [f for f in fils if f['ftype']=='whitelist']
+                            if wl and txt and not any(f['val'].lower() in txt for f in wl): continue
+                        repls = rp_get(ch['id']); dests = json.loads(ch['dests']); cnt = 0
+                        src_reply_id = None
+                        if ev.message.reply_to and hasattr(ev.message.reply_to,'reply_to_msg_id'):
+                            src_reply_id = ev.message.reply_to.reply_to_msg_id
+                        for d in dests:
+                            try:
+                                reply_to_in_dest = None
+                                if src_reply_id:
+                                    rmap = REPLY_MAP.get(uid,{}).get(ch['id'],{}).get(d['id'],{})
+                                    reply_to_in_dest = rmap.get(src_reply_id)
+                                r = await _fwd(cl,ev.message,d['id'],ch,repls,reply_to_msg_id=reply_to_in_dest)
+                                if r:
+                                    cnt += 1
+                                    ds = str(d['id'])
+                                    REPLY_MAP.setdefault(uid,{}).setdefault(ch['id'],{}).setdefault(ds,{})
+                                    REPLY_MAP[uid][ch['id']][ds][ev.message.id] = r.id
+                                    rm2 = REPLY_MAP[uid][ch['id']][ds]
+                                    if len(rm2)>500:
+                                        for k in list(rm2.keys())[:100]: del rm2[k]
+                            except Exception as de: LOG.warning(f"dest err {d['id']}: {de}")
+                            if ch.get('delay_sec',0)>0: await asyncio.sleep(ch['delay_sec'])
+                        if cnt: l_add(uid,ch['id'],ev.message.id,str(ev.chat_id)); u_inc(uid,cnt)
+                    except Exception as ce: LOG.warning(f"ch handler err uid={uid}: {ce}")
+            except Exception as he: LOG.warning(f"handler err uid={uid}: {he}")
 
         async def keep_alive():
-            """Save fresh session every 3 hours."""
-            while True:
+            while uid in ACL:
                 try:
-                    await asyncio.sleep(3 * 3600)
+                    await asyncio.sleep(3*3600)
                     if uid not in ACL: break
                     c = ACL.get(uid)
                     if c:
+                        if not c.is_connected(): await c.connect()
                         if await c.is_user_authorized():
                             s_save(uid, c.session.save())
-                            LOG.info(f"✅ Session saved uid={uid}")
-                        else:
-                            LOG.warning(f"Auth lost uid={uid}, restarting")
-                            asyncio.create_task(eng_start(uid))
-                            break
+                            LOG.info(f"✅ Session alive uid={uid}")
                 except asyncio.CancelledError: break
-                except Exception as e: LOG.warning(f"keep_alive: {e}")
-
+                except Exception as e: LOG.warning(f"keep_alive uid={uid}: {e}")
         asyncio.create_task(keep_alive())
 
         async def runner():
-            """Telethon auto_reconnect=True handles network drops.
-               We only restart on auth errors (session truly expired)."""
-            try:
-                await cl.run_until_disconnected()
-            except Exception as e:
-                LOG.warning(f"Engine uid={uid} stopped: {e}")
-            # If still in ACL, try restart
-            if uid in ACL:
-                LOG.info(f"Engine uid={uid} restarting...")
-                await asyncio.sleep(5)
-                asyncio.create_task(eng_start(uid))
+            fails = 0
+            while True:
+                try:
+                    await cl.run_until_disconnected()
+                    fails = 0
+                except asyncio.CancelledError: break
+                except Exception as e:
+                    fails += 1
+                    wait = min(5*fails, 60)
+                    LOG.warning(f"Engine uid={uid} err#{fails}: {e} wait={wait}s")
+                    await asyncio.sleep(wait)
+                if uid not in ACL: break
+                try:
+                    if not cl.is_connected(): await cl.connect()
+                    if await cl.is_user_authorized():
+                        s_save(uid, cl.session.save()); fails=0
+                        LOG.info(f"✅ Engine uid={uid} reconnected"); continue
+                except: pass
+                if fails >= 5:
+                    LOG.info(f"Engine uid={uid} full restart")
+                    asyncio.create_task(eng_start(uid)); break
 
-        TSK[uid]=asyncio.create_task(runner())
+                TSK[uid]=asyncio.create_task(runner())
         LOG.info(f"✅ Engine uid={uid}")
         return True
     except Exception as e: LOG.error(f"eng_start {uid}: {e}"); return False
@@ -1169,6 +1150,8 @@ async def do_qr(update: Update, ctx):
         # Login success — save session FIRST
         sess = cl.session.save()
         s_save(uid, sess)
+        SESSION_CACHE[uid] = sess
+        KNOWN_USERS.add(uid)  # ✅ Mark as known — never show login again
         is_new = u_upsert(uid, update.effective_user.username or "", update.effective_user.first_name or "")
         me = await cl.get_me()
         nm = me.first_name or ""
@@ -1339,28 +1322,43 @@ async def cbk(update: Update, ctx):
         await _admin_cbk(d, uid, q, ctx, ED, ANS); return
 
     # ── SESSION CHECK ──
-    # ACL = engine running = 100% logged in (most reliable check)
-    in_acl = uid in ACL
-    if not in_acl and not is_admin:
-        # ACL not running — check session
-        sess = s_get(uid)
-        if sess:
-            # Session found — populate cache and start engine
-            SESSION_CACHE[uid] = sess
-            asyncio.create_task(eng_start(uid))
-        else:
-            # No session at all — need login
+    if not is_admin:
+        # If user has EVER logged in this session — never show login screen
+        # Just restart engine silently if needed
+        is_known = uid in KNOWN_USERS
+        has_sess = (uid in ACL) or (uid in SESSION_CACHE) or is_known
+
+        if not has_sess:
+            # Complete stranger — check DB one more time
+            try:
+                c = DB()
+                r = c.execute("SELECT sess FROM sessions WHERE uid=?", (uid,)).fetchone()
+                c.close()
+                if r and r['sess']:
+                    SESSION_CACHE[uid] = r['sess']
+                    KNOWN_USERS.add(uid)
+                    has_sess = True
+            except: pass
+
+        if not has_sess:
+            # Truly unknown user — show login
             try:
                 await q.edit_message_text(
                     f"⚡ {BOT_NAME}\n\nLogin karo:",
                     reply_markup=KB([B("📱 Login with QR Code","qr_login")])
                 )
             except:
-                await q.message.reply_text(
-                    f"⚡ {BOT_NAME}\n\nLogin karo:",
-                    reply_markup=KB([B("📱 Login with QR Code","qr_login")])
-                )
+                try:
+                    await q.message.reply_text(
+                        f"⚡ {BOT_NAME}\n\nLogin karo:",
+                        reply_markup=KB([B("📱 Login with QR Code","qr_login")])
+                    )
+                except: pass
             return
+
+        # Engine not running but session exists — restart silently
+        if uid not in ACL:
+            asyncio.create_task(eng_start(uid))
 
     # ── MAIN ──
     if d == "main":
@@ -2369,16 +2367,18 @@ async def msg_hdl(update: Update, ctx):
 async def post_init(app):
     db_init()
 
-    # Preload ALL sessions into memory cache at startup
+    # ✅ Load ALL sessions into RAM immediately — before any user interaction
     try:
         c = DB()
         rows = c.execute("SELECT uid, sess FROM sessions").fetchall()
         c.close()
         for row in rows:
-            SESSION_CACHE[row['uid']] = row['sess']
-        LOG.info(f"✅ Loaded {len(SESSION_CACHE)} sessions into cache")
+            if row['sess']:
+                SESSION_CACHE[int(row['uid'])] = row['sess']
+                KNOWN_USERS.add(int(row['uid']))  # mark as known
+        LOG.info(f"✅ {len(SESSION_CACHE)} sessions loaded into cache")
     except Exception as e:
-        LOG.warning(f"Session preload error: {e}")
+        LOG.error(f"Session preload failed: {e}")
 
     await app.bot.set_my_commands([
         BotCommand("start",  "Open bot"),
@@ -2386,11 +2386,13 @@ async def post_init(app):
         BotCommand("admin",  "Admin panel"),
         BotCommand("cancel", "Cancel"),
     ])
-    # Delay startup so event loop is fully ready
-    async def _delayed_restart():
-        await asyncio.sleep(2)
+
+    # Start engines after sessions are loaded
+    async def _start_engines():
+        await asyncio.sleep(1)
         await eng_restart_all()
-    asyncio.create_task(_delayed_restart())
+
+    asyncio.create_task(_start_engines())
     LOG.info(f"✅ {BOT_NAME} {BOT_VERSION} Ready!")
 
 def main():
