@@ -211,17 +211,32 @@ def s_save(uid, s):
     c=DB(); c.execute("INSERT OR REPLACE INTO sessions VALUES(?,?)",(uid,s)); c.commit(); c.close()
 
 def s_get(uid):
-    # Check memory cache first — fastest & most reliable
+    # 1. Engine running = definitely logged in
+    if uid in ACL:
+        # Try to get session string from cache/DB but don't block
+        if uid in SESSION_CACHE:
+            return SESSION_CACHE[uid]
+        try:
+            c=DB(); r=c.execute("SELECT sess FROM sessions WHERE uid=?",(uid,)).fetchone(); c.close()
+            if r:
+                SESSION_CACHE[uid] = r['sess']
+                return r['sess']
+        except: pass
+        return "ACL_ACTIVE"  # special marker — engine is running
+    # 2. Memory cache
     if uid in SESSION_CACHE:
         return SESSION_CACHE[uid]
-    # Fallback to DB
-    try:
-        c=DB(); r=c.execute("SELECT sess FROM sessions WHERE uid=?",(uid,)).fetchone(); c.close()
-        if r:
-            SESSION_CACHE[uid] = r['sess']  # populate cache
-            return r['sess']
-    except Exception as e:
-        LOG.warning(f"s_get DB error uid={uid}: {e}")
+    # 3. DB fallback with retry
+    for attempt in range(3):
+        try:
+            c=DB(); r=c.execute("SELECT sess FROM sessions WHERE uid=?",(uid,)).fetchone(); c.close()
+            if r:
+                SESSION_CACHE[uid] = r['sess']
+                return r['sess']
+            return None
+        except Exception as e:
+            LOG.warning(f"s_get retry {attempt} uid={uid}: {e}")
+            import time; time.sleep(0.1)
     return None
 
 def s_del(uid):
@@ -1315,29 +1330,28 @@ async def cbk(update: Update, ctx):
         await _admin_cbk(d, uid, q, ctx, ED, ANS); return
 
     # ── SESSION CHECK ──
-    in_acl   = uid in ACL
-    sess     = s_get(uid)   # checks RAM cache + DB
-    # Populate cache if DB had it
-    if sess and uid not in SESSION_CACHE:
-        SESSION_CACHE[uid] = sess
-    logged_in = bool(sess) or in_acl or is_admin
-
-    if not logged_in:
-        try:
-            await q.edit_message_text(
-                f"⚡ {BOT_NAME}\n\nLogin karo:",
-                reply_markup=KB([B("📱 Login with QR Code","qr_login")])
-            )
-        except:
-            await q.message.reply_text(
-                f"⚡ {BOT_NAME}\n\nLogin karo:",
-                reply_markup=KB([B("📱 Login with QR Code","qr_login")])
-            )
-        return
-
-    # Session exists but engine not running — auto-start silently
-    if sess and not in_acl and not is_admin:
-        asyncio.create_task(eng_start(uid))
+    # ACL = engine running = 100% logged in (most reliable check)
+    in_acl = uid in ACL
+    if not in_acl and not is_admin:
+        # ACL not running — check session
+        sess = s_get(uid)
+        if sess:
+            # Session found — populate cache and start engine
+            SESSION_CACHE[uid] = sess
+            asyncio.create_task(eng_start(uid))
+        else:
+            # No session at all — need login
+            try:
+                await q.edit_message_text(
+                    f"⚡ {BOT_NAME}\n\nLogin karo:",
+                    reply_markup=KB([B("📱 Login with QR Code","qr_login")])
+                )
+            except:
+                await q.message.reply_text(
+                    f"⚡ {BOT_NAME}\n\nLogin karo:",
+                    reply_markup=KB([B("📱 Login with QR Code","qr_login")])
+                )
+            return
 
     # ── MAIN ──
     if d == "main":
