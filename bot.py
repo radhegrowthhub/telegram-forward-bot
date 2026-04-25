@@ -638,21 +638,27 @@ async def eng_start(uid):
     if not sess: return False
     await eng_stop(uid)
     try:
-        cl = TelegramClient(StringSession(sess), API_ID, API_HASH)
+        # ✅ Proper connection settings for stable long-running session
+        cl = TelegramClient(
+            StringSession(sess),
+            API_ID, API_HASH,
+            connection_retries=None,   # retry forever
+            retry_delay=5,             # 5 sec between retries
+            auto_reconnect=True,       # auto reconnect on disconnect
+            request_retries=5,         # retry failed requests
+        )
         await cl.connect()
 
-        # Check auth — if expired, clear session so user re-logins cleanly
         if not await cl.is_user_authorized():
-            LOG.warning(f"Session expired uid={uid} — clearing")
+            LOG.warning(f"Session expired uid={uid}")
             s_del(uid)
             await cl.disconnect()
             return False
 
-        # ✅ Save fresh session after every connect (keeps session alive)
-        fresh_sess = cl.session.save()
-        s_save(uid, fresh_sess)
-
+        # Save fresh session immediately after connect
+        s_save(uid, cl.session.save())
         ACL[uid] = cl
+
         chs = ch_all(uid)
         if not chs: return True
         sm = {}
@@ -733,55 +739,37 @@ async def eng_start(uid):
                 if cnt: l_add(uid,ch['id'],ev.message.id,str(ev.chat_id)); u_inc(uid,cnt)
 
         async def keep_alive():
-            """Refresh session every 6 hours to prevent Telegram logout."""
+            """Save fresh session every 3 hours."""
             while True:
                 try:
-                    await asyncio.sleep(3 * 3600)  # 3 hours
+                    await asyncio.sleep(3 * 3600)
                     if uid not in ACL: break
-                    cl2 = ACL.get(uid)
-                    if cl2 and cl2.is_connected():
-                        if await cl2.is_user_authorized():
-                            fresh = cl2.session.save()
-                            s_save(uid, fresh)
-                            LOG.info(f"✅ Session refreshed uid={uid}")
+                    c = ACL.get(uid)
+                    if c:
+                        if await c.is_user_authorized():
+                            s_save(uid, c.session.save())
+                            LOG.info(f"✅ Session saved uid={uid}")
                         else:
-                            LOG.warning(f"Session invalid uid={uid} — restarting")
-                            await eng_start(uid)
+                            LOG.warning(f"Auth lost uid={uid}, restarting")
+                            asyncio.create_task(eng_start(uid))
                             break
-                    else:
-                        await eng_start(uid)
-                        break
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    LOG.warning(f"keep_alive uid={uid}: {e}")
+                except asyncio.CancelledError: break
+                except Exception as e: LOG.warning(f"keep_alive: {e}")
 
         asyncio.create_task(keep_alive())
 
         async def runner():
-            retry = 0
-            while True:
-                try:
-                    await cl.run_until_disconnected()
-                    LOG.info(f"Engine uid={uid} disconnected")
-                    break
-                except Exception as e:
-                    retry += 1
-                    wait = min(5 * retry, 60)
-                    LOG.warning(f"Engine uid={uid} err (retry {retry}): {e} — wait {wait}s")
-                    await asyncio.sleep(wait)
-                    try:
-                        if not cl.is_connected():
-                            await cl.connect()
-                        if await cl.is_user_authorized():
-                            s_save(uid, cl.session.save())
-                            retry = 0
-                            LOG.info(f"✅ Engine uid={uid} reconnected")
-                            continue
-                    except: pass
-                    LOG.info(f"Engine uid={uid} full restart")
-                    await eng_start(uid)
-                    return
+            """Telethon auto_reconnect=True handles network drops.
+               We only restart on auth errors (session truly expired)."""
+            try:
+                await cl.run_until_disconnected()
+            except Exception as e:
+                LOG.warning(f"Engine uid={uid} stopped: {e}")
+            # If still in ACL, try restart
+            if uid in ACL:
+                LOG.info(f"Engine uid={uid} restarting...")
+                await asyncio.sleep(5)
+                asyncio.create_task(eng_start(uid))
 
         TSK[uid]=asyncio.create_task(runner())
         LOG.info(f"✅ Engine uid={uid}")
