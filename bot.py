@@ -623,34 +623,82 @@ async def _fwd(cl,msg,did,ch,repls,reply_to_msg_id=None):
     try:
         try: did=int(did)
         except: pass
-        raw=msg.text or ""
+
+        # ── CRITICAL: use raw_text (plain text, NO markdown stars) ──
+        # msg.text in Telethon returns **bold** markers for bold entities
+        # msg.raw_text always returns clean plain text without any ** __ ~~ markers
+        raw = msg.raw_text or ""
+
+        # ── Check if we need to transform text at all ──
+        needs_transform = bool(
+            repls or
+            ch.get('block_all_links') or ch.get('block_links') or
+            ch.get('block_www') or ch.get('block_tme') or ch.get('block_at') or
+            (ch.get('free_style') and ch.get('free_style') != 'none') or
+            (ch.get('emoji_str') and ch.get('emoji_pos') != 'off') or
+            ch.get('fmt_bold') or ch.get('fmt_clean') or
+            ch.get('header') or ch.get('footer') or ch.get('remove_cap') or
+            ch.get('ai_on')
+        )
+
+        # ── Word/link replacements ──
         for r in repls:
             if r['rtype'] in ('link','word'): raw=raw.replace(r['old_val'],r['new_val'])
+
+        # ── Link blocking ──
         b_all=bool(ch.get('block_all_links') or ch.get('block_links'))
         b_www=bool(ch.get('block_www')); b_tme=bool(ch.get('block_tme')); b_at=bool(ch.get('block_at'))
         if b_all or b_www or b_tme or b_at: raw=strip_links(raw,b_all,b_www,b_tme,b_at)
+
+        # ── Para block/replace ──
         if raw:
             raw=para_process(raw,ch['id'])
             if raw is None: return None
-        use_html=False; styles_str=ch.get('free_style','none'); es=ch.get('emoji_str',''); ep=ch.get('emoji_pos','off')
+
+        # ── Text styles + emoji (returns HTML-safe text when needed) ──
+        use_html=False
+        styles_str=ch.get('free_style','none'); es=ch.get('emoji_str',''); ep=ch.get('emoji_pos','off')
         if (styles_str and styles_str!='none') or (es and ep!='off'):
             raw,use_html=await ai_rewrite(raw or '',ch)
+
+        # ── Clean extra blank lines ──
         if ch.get('fmt_clean') and raw: raw=re.sub(r'\n{3,}','\n\n',raw).strip()
+
+        # ── Bold Title: ALWAYS use HTML <b> — NEVER ** which shows as stars ──
         if ch.get('fmt_bold') and raw:
-            ls=raw.split('\n')
-            if ls and ls[0].strip():
-                f=_he(ls[0].strip()) if use_html else ls[0].strip()
-                ls[0]=f"<b>{f}</b>" if use_html else f"**{f}**"
-            raw='\n'.join(ls)
-        hdr=(ch.get('header') or '').strip(); ftr=(ch.get('footer') or '').strip()
+            use_html=True   # force HTML mode
+            lines=raw.split('\n')
+            # Find first non-empty line and bold it
+            for i,line in enumerate(lines):
+                if line.strip():
+                    lines[i]=f"<b>{_he(line.strip())}</b>"
+                    break
+            raw='\n'.join(lines)
+
+        # ── Header / Footer (with same style) ──
+        hdr=(ch.get('header') or '').strip()
+        ftr=(ch.get('footer') or '').strip()
         if hdr:
-            h,_=apply_styles(hdr,styles_str) if (styles_str and styles_str!='none') else (_he(hdr) if use_html else hdr,False)
+            if styles_str and styles_str!='none':
+                h,h_html=apply_styles(hdr,styles_str)
+                use_html=use_html or h_html
+            else:
+                h=_he(hdr) if use_html else hdr
             raw=f"{h}\n\n{raw}" if raw else h
         if ftr:
-            f2,_=apply_styles(ftr,styles_str) if (styles_str and styles_str!='none') else (_he(ftr) if use_html else ftr,False)
+            if styles_str and styles_str!='none':
+                f2,f2_html=apply_styles(ftr,styles_str)
+                use_html=use_html or f2_html
+            else:
+                f2=_he(ftr) if use_html else ftr
             raw=f"{raw}\n\n{f2}" if raw else f2
+
         if ch.get('remove_cap'): raw=""
-        parse_mode='html' if use_html else None; sil=bool(ch.get('silent'))
+
+        parse_mode='html' if use_html else None
+        sil=bool(ch.get('silent'))
+
+        # ── Detect media ──
         is_wp=isinstance(getattr(msg,'media',None),MessageMediaWebPage)
         real_media=bool(msg.media and not is_wp)
         is_sticker=False; is_gif=False; is_vidmsg=False
@@ -661,31 +709,63 @@ async def _fwd(cl,msg,did,ch,repls,reply_to_msg_id=None):
                     if isinstance(attr,DocumentAttributeSticker): is_sticker=True
                     if isinstance(attr,DocumentAttributeAnimated): is_gif=True
                     if isinstance(attr,DocumentAttributeVideo) and getattr(attr,'round_message',False): is_vidmsg=True
+
         if ch.get('copy_mode'):
             if real_media:
                 no_cap=(is_sticker or is_gif or is_vidmsg)
                 cap=(raw.strip() or None) if not no_cap else None
                 s=None; import os as _os
+
+                # When no custom transformations done AND no parse_mode needed,
+                # pass original entities so Telegram bold/italic is preserved naturally
+                orig_entities=None
+                if not needs_transform and not use_html:
+                    orig_entities=getattr(msg,'entities',None)
+
                 try:
-                    s=await cl.send_file(did,file=msg.media,caption=cap,silent=sil,reply_to=reply_to_msg_id,parse_mode=parse_mode)
+                    if orig_entities:
+                        s=await cl.send_file(did,file=msg.media,caption=raw.strip() or None,
+                                             caption_entities=orig_entities,
+                                             silent=sil,reply_to=reply_to_msg_id)
+                    else:
+                        s=await cl.send_file(did,file=msg.media,caption=cap,silent=sil,
+                                             reply_to=reply_to_msg_id,parse_mode=parse_mode)
                 except Exception as e1: LOG.warning(f"send_file err:{e1}")
+
                 if not s:
                     tmp=f"tmp_{did}.bin"
                     try:
                         await cl.download_media(msg,file=tmp)
-                        s=await cl.send_file(did,file=tmp,caption=cap,silent=sil,reply_to=reply_to_msg_id,parse_mode=parse_mode)
+                        s=await cl.send_file(did,file=tmp,caption=cap,silent=sil,
+                                             reply_to=reply_to_msg_id,parse_mode=parse_mode)
                     except Exception as e2: LOG.warning(f"dl+upload err:{e2}")
                     try: _os.remove(tmp)
                     except: pass
                 if not s:
                     try: s=await cl.forward_messages(did,msg)
                     except Exception as e3: LOG.error(f"ALL FAILED {did}:{e3}"); return None
+
             elif raw.strip():
-                s=await cl.send_message(did,raw.strip(),silent=sil,link_preview=False,reply_to=reply_to_msg_id,parse_mode=parse_mode)
-            else: return None
+                # Text-only message
+                orig_entities=None
+                if not needs_transform and not use_html:
+                    orig_entities=getattr(msg,'entities',None)
+
+                if orig_entities:
+                    # Preserve original Telegram bold/italic/etc entities — no stars ever
+                    s=await cl.send_message(did,raw.strip(),silent=sil,
+                                            link_preview=False,reply_to=reply_to_msg_id,
+                                            formatting_entities=orig_entities)
+                else:
+                    s=await cl.send_message(did,raw.strip(),silent=sil,
+                                            link_preview=False,reply_to=reply_to_msg_id,
+                                            parse_mode=parse_mode)
+            else:
+                return None
         else:
             try: s=await cl.forward_messages(did,msg)
             except Exception as ef: LOG.error(f"fwd err:{ef}"); return None
+
         if ch.get('pin_msg') and s:
             try: await cl.pin_message(did,s,notify=not sil)
             except: pass
