@@ -1,53 +1,43 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║       🚀 FORWARD PRO BOT — FINAL EDITION v7.0              ║
-║   Fast | QR Timer | Admin No-Login | Pro UI | Selling      ║
+║       🚀 FORWARD PRO BOT — FINAL EDITION v9.0              ║
+║  Individual Media Toggles | Para Block | Multi-Style       ║
 ╚══════════════════════════════════════════════════════════════╝
 SETUP:
-  1. CONFIG mein values daalo
-  2. py -m pip install python-telegram-bot==22.7 telethon qrcode[pil] tgcrypto httpx
-  3. py bot.py
+  pip install python-telegram-bot==22.7 telethon qrcode[pil] tgcrypto httpx
+  py bot.py
 """
 
 # ═══════════════════════════════════════════════════════════════
 #   ⚙️  CONFIG
 # ═══════════════════════════════════════════════════════════════
-API_ID        = 29770180
-API_HASH      = "e4452a45c8d4c9d0d7250f8017033472"
-BOT_TOKEN     = "8336442095:AAF6doNdq6Hdr3kUGrZH0hdOge8eDIt0G2U"
-ADMIN_IDS     = [8660435467]
+API_ID         = 29770180
+API_HASH       = "e4452a45c8d4c9d0d7250f8017033472"
+BOT_TOKEN      = "8336442095:AAF6doNdq6Hdr3kUGrZH0hdOge8eDIt0G2U"
+ADMIN_IDS      = [8660435467]
 ADMIN_USERNAME = "@Shaan_Malik_Official"
-CLAUDE_KEY    = "your-anthropic-key"  # optional AI key
-BOT_NAME      = "Advanced Forward Bot"
-BOT_VERSION   = "v7.0"
-TRIAL_DAYS    = 7
-QR_TIMEOUT    = 30    # 30 seconds QR validity
-PLANS = {
-    "w": ("⚡ Weekly",   7,   19),
-    "m": ("🌟 Monthly",  30,  49),
-    "y": ("👑 Yearly",   365, 399),
-}
+CLAUDE_KEY     = "your-anthropic-key"
+BOT_NAME       = "Advanced Forward Bot"
+BOT_VERSION    = "v9.0"
+TRIAL_DAYS     = 7
+QR_TIMEOUT     = 30
 CHATS_PER_PAGE = 14
 # ═══════════════════════════════════════════════════════════════
 
-import asyncio, os, time, json, re, logging, sqlite3, qrcode
-import sys
-
-# Windows pe local, Railway/Linux pe current directory
+import asyncio, os, time, json, re, logging, sqlite3, qrcode, sys
 DB_PATH = "fpro.db"
 
-# Windows pe SelectorEventLoop chahiye
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from telegram import Update, InlineKeyboardButton as IB, InlineKeyboardMarkup as IM, BotCommand
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
+                           MessageHandler, ContextTypes, filters as tg_filters)
 from telethon import TelegramClient, events
 from telethon.tl.types import (
-    Channel, Chat, MessageMediaWebPage,
-    MessageMediaPhoto, MessageMediaDocument,
-    DocumentAttributeSticker, DocumentAttributeVideo,
-    DocumentAttributeAnimated,
+    Channel, Chat, MessageMediaWebPage, MessageMediaPhoto, MessageMediaDocument,
+    DocumentAttributeSticker, DocumentAttributeVideo, DocumentAttributeAnimated,
+    DocumentAttributeAudio,
 )
 from telethon.sessions import StringSession
 
@@ -55,10 +45,34 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 LOG = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════
+#   MEDIA TYPE DEFINITIONS
+#   Each entry: key -> (emoji_label, db_column)
+#   db_column is stored in channels table as blk_<key>
+# ═══════════════════════════════════════════════════════════════
+MEDIA_TYPES = {
+    "photo":      ("🖼️  Photo",           "blk_photo"),
+    "screenshot": ("📸 Screenshot",        "blk_screenshot"),
+    "video":      ("🎬 Video",             "blk_video"),
+    "vidmsg":     ("⭕ Video Message",     "blk_vidmsg"),
+    "voice":      ("🎤 Voice Message",     "blk_voice"),
+    "audio":      ("🎵 Audio / Music",     "blk_audio"),
+    "doc":        ("📄 Document / File",   "blk_doc"),
+    "sticker":    ("😄 Sticker",           "blk_sticker"),
+    "gif":        ("🎞️  GIF / Animation",  "blk_gif"),
+}
+
+# Ordered display groups for the UI
+MEDIA_GROUPS = [
+    ("── 🖼️  Images ──────────────────", ["photo", "screenshot"]),
+    ("── 🎬  Video ───────────────────", ["video", "vidmsg"]),
+    ("── 🎤  Audio ───────────────────", ["voice", "audio"]),
+    ("── 📎  Other ───────────────────", ["doc", "sticker", "gif"]),
+]
+
+# ═══════════════════════════════════════════════════════════════
 #   DATABASE
 # ═══════════════════════════════════════════════════════════════
 import threading
-_DB_LOCK = threading.Lock()
 
 def DB():
     c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15)
@@ -68,14 +82,20 @@ def DB():
 
 def db_init():
     c = DB()
-    c.executescript("""
+    # Base media block columns for CREATE TABLE
+    media_cols = "\n".join(
+        f"        {v[1]} INTEGER DEFAULT 0," for v in MEDIA_TYPES.values()
+    )
+    c.executescript(f"""
     PRAGMA journal_mode=WAL;
+
     CREATE TABLE IF NOT EXISTS users(
-        uid INTEGER PRIMARY KEY, uname TEXT DEFAULT '',
-        name TEXT DEFAULT '', sub_end REAL DEFAULT 0,
-        bot_on INTEGER DEFAULT 1, joined REAL DEFAULT 0,
-        total_fwd INTEGER DEFAULT 0, is_banned INTEGER DEFAULT 0);
+        uid INTEGER PRIMARY KEY, uname TEXT DEFAULT '', name TEXT DEFAULT '',
+        sub_end REAL DEFAULT 0, bot_on INTEGER DEFAULT 1,
+        joined REAL DEFAULT 0, total_fwd INTEGER DEFAULT 0, is_banned INTEGER DEFAULT 0);
+
     CREATE TABLE IF NOT EXISTS sessions(uid INTEGER PRIMARY KEY, sess TEXT);
+
     CREATE TABLE IF NOT EXISTS channels(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         uid INTEGER, ch_name TEXT DEFAULT 'Channel',
@@ -89,98 +109,102 @@ def db_init():
         footer TEXT DEFAULT '', ai_on INTEGER DEFAULT 0,
         ai_style TEXT DEFAULT 'none', ai_prompt TEXT DEFAULT '',
         fmt_bold INTEGER DEFAULT 0, fmt_clean INTEGER DEFAULT 0,
-        block_at INTEGER DEFAULT 0,
-        block_www INTEGER DEFAULT 0,
-        block_tme INTEGER DEFAULT 0,
-        block_all_links INTEGER DEFAULT 0,
+        block_at INTEGER DEFAULT 0, block_www INTEGER DEFAULT 0,
+        block_tme INTEGER DEFAULT 0, block_all_links INTEGER DEFAULT 0,
+        free_style TEXT DEFAULT 'none', emoji_str TEXT DEFAULT '',
+        emoji_pos TEXT DEFAULT 'off',
+        {media_cols}
         created REAL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS flt(id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ch_id INTEGER, uid INTEGER, ftype TEXT, val TEXT);
-    CREATE TABLE IF NOT EXISTS repl(id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    CREATE TABLE IF NOT EXISTS flt(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ch_id INTEGER, uid INTEGER, ftype TEXT, val TEXT, extra TEXT DEFAULT '');
+
+    CREATE TABLE IF NOT EXISTS repl(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         ch_id INTEGER, uid INTEGER, rtype TEXT, old_val TEXT, new_val TEXT);
-    CREATE TABLE IF NOT EXISTS fwd_log(id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    CREATE TABLE IF NOT EXISTS fwd_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         uid INTEGER, ch_id INTEGER, msg_id INTEGER, src TEXT, ts REAL DEFAULT 0);
+
     CREATE INDEX IF NOT EXISTS idx_fwd_uid ON fwd_log(uid);
     CREATE INDEX IF NOT EXISTS idx_fwd_ts  ON fwd_log(ts);
+
     CREATE TABLE IF NOT EXISTS plans(
-        key TEXT PRIMARY KEY,
-        label TEXT, days INTEGER, price INTEGER, enabled INTEGER DEFAULT 1);
-    CREATE TABLE IF NOT EXISTS settings(
-        key TEXT PRIMARY KEY, value TEXT);
+        key TEXT PRIMARY KEY, label TEXT, days INTEGER,
+        price INTEGER, max_channels INTEGER DEFAULT 0, enabled INTEGER DEFAULT 1);
+
+    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     """)
-    # Migration — add new columns if not exist
-    for col, default in [
-        ("block_at","0"), ("block_www","0"),
-        ("block_all_links","0"), ("block_tme","0"),
-        ("free_style","'none'"),
-        ("emoji_str","''"),
-        ("emoji_pos","'off'"),
-        ("block_tme","0"), ("block_all_links","0")
-    ]:
-        try:
-            c.execute(f"ALTER TABLE channels ADD COLUMN {col} INTEGER DEFAULT {default}")
-        except: pass
-    # Insert default plans if not exist
-    defaults = [
-        ("w", "⚡ Weekly",  7,   19,  1),
-        ("m", "🌟 Monthly", 30,  49,  1),
-        ("y", "👑 Yearly",  365, 399, 1),
+
+    # Migration: add columns if missing
+    migrations = [
+        ("channels", "block_at",       "INTEGER DEFAULT 0"),
+        ("channels", "block_www",      "INTEGER DEFAULT 0"),
+        ("channels", "block_all_links","INTEGER DEFAULT 0"),
+        ("channels", "block_tme",      "INTEGER DEFAULT 0"),
+        ("channels", "free_style",     "TEXT DEFAULT 'none'"),
+        ("channels", "emoji_str",      "TEXT DEFAULT ''"),
+        ("channels", "emoji_pos",      "TEXT DEFAULT 'off'"),
+        ("flt",      "extra",          "TEXT DEFAULT ''"),
+        ("plans",    "max_channels",   "INTEGER DEFAULT 0"),
     ]
-    for row in defaults:
-        c.execute("INSERT OR IGNORE INTO plans(key,label,days,price,enabled) VALUES(?,?,?,?,?)", row)
-    # Default settings
-    c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('trial_days','7')")
+    # Add all media block columns
+    for mkey, (mlabel, mcol) in MEDIA_TYPES.items():
+        migrations.append(("channels", mcol, "INTEGER DEFAULT 0"))
+
+    for tbl, col, defn in migrations:
+        try: c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {defn}")
+        except: pass
+
+    for row in [
+        ("w","⚡ Weekly",  7,  19, 0, 1),
+        ("m","🌟 Monthly",30,  49, 0, 1),
+        ("y","👑 Yearly",365,399, 0, 1),
+    ]:
+        c.execute("INSERT OR IGNORE INTO plans VALUES(?,?,?,?,?,?)", row)
+
+    c.execute("INSERT OR IGNORE INTO settings VALUES('trial_days','7')")
     c.commit(); c.close()
 
-# ── Plans (Dynamic) ────────────────────────────────────────────
-def plan_all():
-    c=DB(); r=c.execute("SELECT * FROM plans ORDER BY days").fetchall(); c.close()
-    return [dict(i) for i in r]
-
-def plan_get(key):
-    c=DB(); r=c.execute("SELECT * FROM plans WHERE key=?",(key,)).fetchone(); c.close()
-    return dict(r) if r else None
-
-def plan_upd(key, **kw):
-    c=DB()
-    for k,v in kw.items(): c.execute(f"UPDATE plans SET {k}=? WHERE key=?",(v,key))
-    c.commit(); c.close()
-
-def plan_add(key, label, days, price):
-    c=DB(); c.execute("INSERT OR REPLACE INTO plans(key,label,days,price,enabled) VALUES(?,?,?,?,1)",(key,label,days,price)); c.commit(); c.close()
-
-def plan_del(key):
-    c=DB(); c.execute("DELETE FROM plans WHERE key=?",(key,)); c.commit(); c.close()
-
+# ── Helpers ────────────────────────────────────────────────────
 def setting_get(key, default=""):
     c=DB(); r=c.execute("SELECT value FROM settings WHERE key=?",(key,)).fetchone(); c.close()
     return r['value'] if r else default
-
 def setting_set(key, value):
-    c=DB(); c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",(key,str(value))); c.commit(); c.close()
+    c=DB(); c.execute("INSERT OR REPLACE INTO settings VALUES(?,?)",(key,str(value))); c.commit(); c.close()
+def get_trial_days(): return int(setting_get('trial_days','7'))
 
-def get_trial_days():
-    return int(setting_get('trial_days', '7'))
+def plan_all():
+    c=DB(); r=c.execute("SELECT * FROM plans ORDER BY days").fetchall(); c.close()
+    return [dict(i) for i in r]
+def plan_get(key):
+    c=DB(); r=c.execute("SELECT * FROM plans WHERE key=?",(key,)).fetchone(); c.close()
+    return dict(r) if r else None
+def plan_upd(key,**kw):
+    c=DB()
+    for k,v in kw.items(): c.execute(f"UPDATE plans SET {k}=? WHERE key=?",(v,key))
+    c.commit(); c.close()
+def plan_add(key,label,days,price,max_channels=0):
+    c=DB(); c.execute("INSERT OR REPLACE INTO plans VALUES(?,?,?,?,?,1)",(key,label,days,price,max_channels)); c.commit(); c.close()
+def plan_del(key):
+    c=DB(); c.execute("DELETE FROM plans WHERE key=?",(key,)); c.commit(); c.close()
 
-# ── Users ──────────────────────────────────────────────────────
-def u_upsert(uid, un="", nm=""):
+def u_upsert(uid,un="",nm=""):
     c=DB(); r=c.execute("SELECT uid FROM users WHERE uid=?",(uid,)).fetchone()
     new=r is None; now=time.time()
     if new: c.execute("INSERT INTO users(uid,uname,name,sub_end,joined) VALUES(?,?,?,?,?)",(uid,un,nm,now+get_trial_days()*86400,now))
     else:   c.execute("UPDATE users SET uname=?,name=? WHERE uid=?",(un,nm,uid))
     c.commit(); c.close(); return new
-
 def u_get(uid):
     c=DB(); r=c.execute("SELECT * FROM users WHERE uid=?",(uid,)).fetchone(); c.close()
     return dict(r) if r else None
-
 def u_all():
     c=DB(); r=c.execute("SELECT * FROM users ORDER BY joined DESC").fetchall(); c.close()
     return [dict(i) for i in r]
-
 def u_ok(uid):
     u=u_get(uid); return bool(u and not u['is_banned'] and time.time()<u['sub_end'])
-
 def u_sub_str(uid):
     u=u_get(uid)
     if not u: return "❌ No Account"
@@ -189,102 +213,95 @@ def u_sub_str(uid):
     if rem<=0: return "❌ Expired"
     d=int(rem//86400); h=int((rem%86400)//3600); m=int((rem%3600)//60)
     return f"✅ {d}d {h}h {m}m"
-
 def u_sub_end_str(uid):
-    import datetime
-    u=u_get(uid)
+    import datetime; u=u_get(uid)
     if not u or u['sub_end']<=time.time(): return "Expired"
     return datetime.datetime.fromtimestamp(u['sub_end']).strftime("%d %b %Y, %I:%M %p")
-
-def u_give(uid, days):
+def u_give(uid,days):
     c=DB(); u=c.execute("SELECT sub_end FROM users WHERE uid=?",(uid,)).fetchone()
-    now=time.time(); base=max(u['sub_end'] if u else now, now)
+    now=time.time(); base=max(u['sub_end'] if u else now,now)
     c.execute("UPDATE users SET sub_end=? WHERE uid=?",(base+days*86400,uid)); c.commit(); c.close()
-
 def u_revoke(uid): c=DB(); c.execute("UPDATE users SET sub_end=? WHERE uid=?",(time.time()-1,uid)); c.commit(); c.close()
 def u_ban(uid,v=True): c=DB(); c.execute("UPDATE users SET is_banned=? WHERE uid=?",(int(v),uid)); c.commit(); c.close()
 def u_toggle_bot(uid,v): c=DB(); c.execute("UPDATE users SET bot_on=? WHERE uid=?",(int(v),uid)); c.commit(); c.close()
 def u_bot_on(uid): u=u_get(uid); return bool(u and u['bot_on'])
 def u_inc(uid,n=1): c=DB(); c.execute("UPDATE users SET total_fwd=total_fwd+? WHERE uid=?",(n,uid)); c.commit(); c.close()
+def u_set_plan(uid,pk): setting_set(f"user_plan_{uid}",pk)
+def u_channel_limit(uid):
+    c=DB(); r=c.execute("SELECT value FROM settings WHERE key=?",(f"user_plan_{uid}",)).fetchone(); c.close()
+    if r and r['value']:
+        p=plan_get(r['value'])
+        if p: return len(ch_all(uid)), int(p.get('max_channels') or 0)
+    return len(ch_all(uid)), 0
+def u_can_add_channel(uid):
+    cur,mx=u_channel_limit(uid)
+    if mx==0: return True,""
+    if cur>=mx: return False,f"❌ Plan limit!\n\nMax {mx} channel(s) allowed.\nYou have {cur}.\n\nUpgrade plan."
+    return True,""
 
-# In-memory session cache — avoids repeated DB hits & SQLite busy errors
-SESSION_CACHE: dict = {}
-KNOWN_USERS:   set  = set()  # users who have ever logged in this session
+SESSION_CACHE:dict={}
+KNOWN_USERS:set=set()
 
-def s_save(uid, s):
-    SESSION_CACHE[uid] = s  # cache first
+def s_save(uid,s):
+    SESSION_CACHE[uid]=s
     c=DB(); c.execute("INSERT OR REPLACE INTO sessions VALUES(?,?)",(uid,s)); c.commit(); c.close()
-
 def s_get(uid):
-    # 1. Engine running = 100% logged in
-    if uid in ACL:
-        return SESSION_CACHE.get(uid, "ACL_ACTIVE")
-    # 2. Memory cache — instant
-    if uid in SESSION_CACHE:
-        return SESSION_CACHE[uid]
-    # 3. DB with retry
-    for attempt in range(3):
+    if uid in ACL: return SESSION_CACHE.get(uid,"ACL_ACTIVE")
+    if uid in SESSION_CACHE: return SESSION_CACHE[uid]
+    for _ in range(3):
         try:
-            c = DB()
-            r = c.execute("SELECT sess FROM sessions WHERE uid=?", (uid,)).fetchone()
-            c.close()
-            if r:
-                SESSION_CACHE[uid] = r['sess']
-                return r['sess']
+            c=DB(); r=c.execute("SELECT sess FROM sessions WHERE uid=?",(uid,)).fetchone(); c.close()
+            if r: SESSION_CACHE[uid]=r['sess']; return r['sess']
             return None
-        except Exception as e:
-            LOG.warning(f"s_get retry {attempt} uid={uid}: {e}")
-            import time as _t; _t.sleep(0.2)
+        except: time.sleep(0.2)
     return None
-
 def s_del(uid):
-    SESSION_CACHE.pop(uid, None)  # clear cache
+    SESSION_CACHE.pop(uid,None)
     c=DB(); c.execute("DELETE FROM sessions WHERE uid=?",(uid,)); c.commit(); c.close()
 
-# ── Channels ───────────────────────────────────────────────────
 def ch_add(uid,src_id,src_name,ch_name):
-    c=DB(); cur=c.execute("INSERT INTO channels(uid,ch_name,src_id,src_name,created) VALUES(?,?,?,?,?)",(uid,ch_name,src_id,src_name,time.time()))
+    c=DB()
+    cur=c.execute("INSERT INTO channels(uid,ch_name,src_id,src_name,created) VALUES(?,?,?,?,?)",(uid,ch_name,src_id,src_name,time.time()))
     cid=cur.lastrowid; c.commit(); c.close(); return cid
-
 def ch_all(uid):
     c=DB(); r=c.execute("SELECT * FROM channels WHERE uid=? ORDER BY id",(uid,)).fetchall(); c.close()
     return [dict(i) for i in r]
-
 def ch_get(cid):
     c=DB(); r=c.execute("SELECT * FROM channels WHERE id=?",(cid,)).fetchone(); c.close()
     return dict(r) if r else None
-
 def ch_upd(cid,**kw):
     c=DB()
     for k,v in kw.items(): c.execute(f"UPDATE channels SET {k}=? WHERE id=?",(v,cid))
     c.commit(); c.close()
-
 def ch_del(cid,uid):
     c=DB()
     c.execute("DELETE FROM channels WHERE id=? AND uid=?",(cid,uid))
     c.execute("DELETE FROM flt WHERE ch_id=?",(cid,))
     c.execute("DELETE FROM repl WHERE ch_id=?",(cid,))
     c.commit(); c.close()
-
 def ch_toggle(cid):
     r=ch_get(cid); new=0 if r['enabled'] else 1; ch_upd(cid,enabled=new); return bool(new)
-
 def ch_add_dest(cid,did,dname):
     r=ch_get(cid); dests=json.loads(r['dests'])
     if not any(d['id']==str(did) for d in dests):
         dests.append({'id':str(did),'name':dname}); ch_upd(cid,dests=json.dumps(dests)); return True
     return False
-
 def ch_del_dest(cid,did):
     r=ch_get(cid); dests=[d for d in json.loads(r['dests']) if d['id']!=str(did)]
     ch_upd(cid,dests=json.dumps(dests))
 
-def f_add(cid,uid,ft,val): c=DB(); c.execute("INSERT INTO flt(ch_id,uid,ftype,val) VALUES(?,?,?,?)",(cid,uid,ft,val)); c.commit(); c.close()
+def f_add(cid,uid,ft,val,extra=""):
+    c=DB(); c.execute("INSERT INTO flt(ch_id,uid,ftype,val,extra) VALUES(?,?,?,?,?)",(cid,uid,ft,val,extra)); c.commit(); c.close()
 def f_get(cid):
-    c=DB(); r=c.execute("SELECT * FROM flt WHERE ch_id=?",(cid,)).fetchall(); c.close(); return [dict(i) for i in r]
+    c=DB(); r=c.execute("SELECT * FROM flt WHERE ch_id=?",(cid,)).fetchall(); c.close()
+    return [dict(i) for i in r]
+def f_get_type(cid,ftype):
+    c=DB(); r=c.execute("SELECT * FROM flt WHERE ch_id=? AND ftype=?",(cid,ftype)).fetchall(); c.close()
+    return [dict(i) for i in r]
 def f_del(fid): c=DB(); c.execute("DELETE FROM flt WHERE id=?",(fid,)); c.commit(); c.close()
 
-def rp_add(cid,uid,rt,o,n): c=DB(); c.execute("INSERT INTO repl(ch_id,uid,rtype,old_val,new_val) VALUES(?,?,?,?,?)",(cid,uid,rt,o,n)); c.commit(); c.close()
+def rp_add(cid,uid,rt,o,n):
+    c=DB(); c.execute("INSERT INTO repl(ch_id,uid,rtype,old_val,new_val) VALUES(?,?,?,?,?)",(cid,uid,rt,o,n)); c.commit(); c.close()
 def rp_get(cid,rt=None):
     c=DB()
     if rt: r=c.execute("SELECT * FROM repl WHERE ch_id=? AND rtype=?",(cid,rt)).fetchall()
@@ -292,17 +309,17 @@ def rp_get(cid,rt=None):
     c.close(); return [dict(i) for i in r]
 def rp_del(rpid): c=DB(); c.execute("DELETE FROM repl WHERE id=?",(rpid,)); c.commit(); c.close()
 
-def l_add(uid,cid,mid,src): c=DB(); c.execute("INSERT INTO fwd_log(uid,ch_id,msg_id,src,ts) VALUES(?,?,?,?,?)",(uid,cid,mid,str(src),time.time())); c.commit(); c.close()
+def l_add(uid,cid,mid,src):
+    c=DB(); c.execute("INSERT INTO fwd_log(uid,ch_id,msg_id,src,ts) VALUES(?,?,?,?,?)",(uid,cid,mid,str(src),time.time())); c.commit(); c.close()
 def l_dup(cid,mid,src):
-    c=DB(); r=c.execute("SELECT id FROM fwd_log WHERE ch_id=? AND msg_id=? AND src=?",(cid,mid,str(src))).fetchone(); c.close(); return r is not None
-
+    c=DB(); r=c.execute("SELECT id FROM fwd_log WHERE ch_id=? AND msg_id=? AND src=?",(cid,mid,str(src))).fetchone(); c.close()
+    return r is not None
 def l_stats(uid):
     c=DB()
     tot=c.execute("SELECT COUNT(*) as n FROM fwd_log WHERE uid=?",(uid,)).fetchone()['n']
     tod=c.execute("SELECT COUNT(*) as n FROM fwd_log WHERE uid=? AND ts>?",(uid,time.time()-86400)).fetchone()['n']
-    wk =c.execute("SELECT COUNT(*) as n FROM fwd_log WHERE uid=? AND ts>?",(uid,time.time()-604800)).fetchone()['n']
+    wk=c.execute("SELECT COUNT(*) as n FROM fwd_log WHERE uid=? AND ts>?",(uid,time.time()-604800)).fetchone()['n']
     c.close(); return tot,tod,wk
-
 def adm_stats():
     c=DB(); now=time.time()
     tu=c.execute("SELECT COUNT(*) as n FROM users").fetchone()['n']
@@ -315,471 +332,399 @@ def adm_stats():
     c.close(); return tu,au,tf,tr,tb,td,nw
 
 # ═══════════════════════════════════════════════════════════════
+#   MEDIA DETECTION
+# ═══════════════════════════════════════════════════════════════
+def detect_media_type(msg) -> str | None:
+    """Returns one of the MEDIA_TYPES keys, or None for text/webpage."""
+    media=getattr(msg,'media',None)
+    if not media or isinstance(media,MessageMediaWebPage): return None
+    if isinstance(media,MessageMediaPhoto): return "photo"
+    if isinstance(media,MessageMediaDocument):
+        doc=media.document
+        if not doc or not hasattr(doc,'attributes'): return "doc"
+        for a in (doc.attributes or []):
+            if isinstance(a,DocumentAttributeSticker):  return "sticker"
+            if isinstance(a,DocumentAttributeAnimated): return "gif"
+            if isinstance(a,DocumentAttributeVideo):
+                return "vidmsg" if getattr(a,'round_message',False) else "video"
+            if isinstance(a,DocumentAttributeAudio):
+                return "voice" if getattr(a,'voice',False) else "audio"
+        return "doc"
+    return None
+
+def is_media_blocked(ch:dict, mtype:str|None) -> bool:
+    """True if this media type should be blocked for this channel."""
+    if mtype is None: return False
+    col = MEDIA_TYPES.get(mtype,(None,None))[1]
+    if col and ch.get(col): return True
+    return False
+
+# ═══════════════════════════════════════════════════════════════
+#   PARAGRAPH BLOCK / REPLACE
+# ═══════════════════════════════════════════════════════════════
+def para_process(text:str, ch_id:int) -> str|None:
+    """
+    para_block  → remove paragraph that contains trigger word
+    para (repl) → replace whole paragraph with new text
+    Returns None if entire message should be dropped.
+    """
+    if not text: return text
+    paragraphs=re.split(r'\n{2,}',text)
+    para_blocks=f_get_type(ch_id,'para_block')
+    para_repls=rp_get(ch_id,'para')
+    if not para_blocks and not para_repls: return text
+    result=[]
+    for para in paragraphs:
+        pl=para.lower(); blocked=False; replaced=False
+        for f in para_blocks:
+            if f['val'].lower() in pl: blocked=True; break
+        if blocked: continue
+        for r in para_repls:
+            if r['old_val'].lower() in pl:
+                nv=r['new_val']
+                if nv and nv!='-': result.append(nv)
+                replaced=True; break
+        if not replaced: result.append(para)
+    if not result: return None
+    return "\n\n".join(result)
+
+# ═══════════════════════════════════════════════════════════════
 #   CHAT CACHE
 # ═══════════════════════════════════════════════════════════════
-CHAT_CACHE: dict = {}
+CHAT_CACHE:dict={}
 
-async def fetch_chats(uid: int) -> list:
-    client = ACL.get(uid)
-    sess = s_get(uid)
+async def fetch_chats(uid:int)->list:
+    client=ACL.get(uid); sess=s_get(uid)
     if not client and not sess: return []
-    own = False
+    own=False
     if not client:
-        client = TelegramClient(StringSession(sess), API_ID, API_HASH)
-        await client.connect(); own = True
-    chats = []
+        client=TelegramClient(StringSession(sess),API_ID,API_HASH); await client.connect(); own=True
+    chats=[]
     try:
-        dialogs = await client.get_dialogs(limit=300)
+        dialogs=await client.get_dialogs(limit=300)
         for d in dialogs:
-            e = d.entity
-            if isinstance(e, (Channel, Chat)):
-                icon = "📢" if getattr(e,'broadcast',False) else "👥"
-                sid = str(e.id)
-                if not sid.startswith('-'): sid = f"-100{sid}"
+            e=d.entity
+            if isinstance(e,(Channel,Chat)):
+                icon="📢" if getattr(e,'broadcast',False) else "👥"
+                sid=str(e.id)
+                if not sid.startswith('-'): sid=f"-100{sid}"
                 chats.append({'id':sid,'name':e.title or "Unknown",'icon':icon})
-        CHAT_CACHE[uid] = chats
-    except Exception as ex:
-        LOG.error(f"fetch_chats {uid}: {ex}")
+        CHAT_CACHE[uid]=chats
+    except Exception as ex: LOG.error(f"fetch_chats {uid}: {ex}")
     finally:
         if own:
             try: await client.disconnect()
             except: pass
     return chats
 
-def chat_list_text(chats, page=0):
-    start = page * CHATS_PER_PAGE
-    end   = start + CHATS_PER_PAGE
-    pc    = chats[start:end]
-    lines = [f"{start+i+1}. {c['icon']} {c['name']}" for i,c in enumerate(pc)]
-    return "\n".join(lines), pc
+def chat_list_text(chats,page=0):
+    start=page*CHATS_PER_PAGE; end=start+CHATS_PER_PAGE; pc=chats[start:end]
+    return "\n".join(f"{start+i+1}. {c['icon']} {c['name']}" for i,c in enumerate(pc)), pc
 
-def num_kb(chats, page, prefix, total):
-    start = page * CHATS_PER_PAGE
-    end   = min(start + CHATS_PER_PAGE, total)
-    nums  = list(range(start+1, end+1))
-    rows  = []
-    r1    = [IB(str(n), callback_data=f"{prefix}_{n-1}") for n in nums[:7]]
-    r2    = [IB(str(n), callback_data=f"{prefix}_{n-1}") for n in nums[7:14]]
+def num_kb(chats,page,prefix,total):
+    start=page*CHATS_PER_PAGE; end=min(start+CHATS_PER_PAGE,total)
+    nums=list(range(start+1,end+1)); rows=[]
+    r1=[IB(str(n),callback_data=f"{prefix}_{n-1}") for n in nums[:7]]
+    r2=[IB(str(n),callback_data=f"{prefix}_{n-1}") for n in nums[7:14]]
     if r1: rows.append(r1)
     if r2: rows.append(r2)
-    nav = []
-    if page > 0:          nav.append(IB("◀ Prev", callback_data=f"pg_{prefix}_{page-1}"))
-    if end < total:       nav.append(IB("Next ▶", callback_data=f"pg_{prefix}_{page+1}"))
+    nav=[]
+    if page>0:    nav.append(IB("◀ Prev",callback_data=f"pg_{prefix}_{page-1}"))
+    if end<total: nav.append(IB("Next ▶",callback_data=f"pg_{prefix}_{page+1}"))
     if nav: rows.append(nav)
-    rows.append([IB("🔄 Refresh", callback_data=f"refr_{prefix}"),
-                 IB("🏠 Home",   callback_data="main")])
+    rows.append([IB("🔄 Refresh",callback_data=f"refr_{prefix}"),IB("🏠 Home",callback_data="main")])
     return IM(rows)
 
 # ═══════════════════════════════════════════════════════════════
-#   AI
+#   TEXT STYLE ENGINE
 # ═══════════════════════════════════════════════════════════════
-AI_STYLES = {
-    "none":      ("❌ Off",       "No AI"),
-    "news":      ("📰 News",      "Professional news bulletin"),
-    "casual":    ("💬 Casual",    "Friendly casual tone"),
-    "formal":    ("🎩 Formal",    "Formal professional tone"),
-    "short":     ("✂️ Short",     "Summarize in 2-3 lines"),
-    "bullet":    ("• Bullets",    "Convert to bullet points"),
-    "emoji":     ("😊 Emoji",     "Add emojis make engaging"),
-    "clickbait": ("🔥 Clickbait", "Catchy attention-grabbing"),
-    "clean":     ("🧹 Clean",     "Remove promos and links"),
-    "custom":    ("✏️ Custom",    "My custom AI prompt"),
+STYLE_DEFS={
+    "bold":"𝗕𝗼𝗹𝗱","italic":"𝘐𝘵𝘢𝘭𝘪𝗰","bold_italic":"𝗕𝗼𝗹𝗱+𝘐𝘵𝘢𝘭𝘊",
+    "caps":"CAPS LOCK","lower":"lowercase","title":"Title Case",
+    "clean":"🧹 Clean","lines":"📋 Each Line ▪️","mono":"`Mono`",
+}
+STYLE_COMBOS={"bold_italic":("bold","italic")}
+EMOJI_POS={"off":"❌ Off","start":"▶️ Start","end":"◀️ End","both":"↔️ Both","lines":"📋 Every Line"}
+AI_STYLES={
+    "none":("❌ Off",""),"news":("📰 News","Professional news bulletin"),
+    "casual":("💬 Casual","Friendly casual tone"),"formal":("🎩 Formal","Formal professional tone"),
+    "short":("✂️ Short","Summarize in 2-3 lines"),"bullet":("• Bullets","Convert to bullet points"),
+    "emoji":("😊 Emoji","Add emojis"),"clickbait":("🔥 Clickbait","Catchy attention-grabbing"),
+    "clean":("🧹 Clean","Remove promos and links"),"custom":("✏️ Custom","My custom AI prompt"),
 }
 
-# ── FREE TEXT STYLES (No API key needed) ───────────────────────
-FREE_STYLES = {
-    "fs_none":    ("❌ Off",          None),
-    "fs_bold":    ("𝗕𝗼𝗹𝗱",           "bold"),
-    "fs_italic":  ("𝘐𝘵𝘢𝘭𝘪𝘤",         "italic"),
-    "fs_caps":    ("CAPS LOCK",       "caps"),
-    "fs_lower":   ("lowercase",       "lower"),
-    "fs_title":   ("Title Case",      "title"),
-    "fs_clean":   ("🧹 Clean Spaces", "clean"),
-    "fs_lines":   ("📋 Each Line ▪️", "lines"),
-    "fs_mono":    ("`Monospace`",     "mono"),
-}
+def _he(t): return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+def _short(text,n=20):
+    if not text: return "—"
+    text=text.strip(); return text[:n]+"…" if len(text)>n else text
+def parse_style_set(s):
+    if not s or s=='none': return set()
+    return {x.strip().lstrip('fs_') for x in s.split(',') if x.strip() and x.strip()!='none'}
+def encode_style_set(st):
+    cleaned={s for s in st if s and s!='none'}
+    return ','.join(sorted(cleaned)) if cleaned else 'none'
 
-# Emoji positions
-EMOJI_POS = {
-    "off":    "❌ Off",
-    "start":  "▶️ Message Start",
-    "end":    "◀️ Message End",
-    "both":   "↔️ Start + End",
-    "lines":  "📋 Every Line Start",
-}
+def apply_styles(text,styles_str):
+    if not text or not styles_str or styles_str=='none': return text,False
+    active=set()
+    for s in styles_str.split(','):
+        s=s.strip().lstrip('fs_')
+        if not s or s=='none': continue
+        if s in STYLE_COMBOS:
+            for sub in STYLE_COMBOS[s]: active.add(sub)
+        else: active.add(s)
+    if not active: return text,False
+    use_html=bool(active & {'bold','italic','mono'}); result=text
+    if 'caps' in active:   result=result.upper()
+    elif 'lower' in active: result=result.lower()
+    elif 'title' in active: result=result.title()
+    if 'clean' in active:
+        result=re.sub(r' {2,}',' ',result); result=re.sub(r'\n{3,}','\n\n',result); result=result.strip()
+    if 'lines' in active:
+        result='\n'.join(f"▪️ {l}" if l.strip() else l for l in result.split('\n'))
+    if use_html:
+        lns=result.split('\n'); new_lns=[]
+        for line in lns:
+            if line.strip():
+                l=_he(line)
+                if 'bold' in active and 'italic' in active: l=f"<b><i>{l}</i></b>"
+                elif 'bold' in active:   l=f"<b>{l}</b>"
+                elif 'italic' in active: l=f"<i>{l}</i>"
+                if 'mono' in active: l=f"<code>{l}</code>"
+                new_lns.append(l)
+            else: new_lns.append(line)
+        result='\n'.join(new_lns)
+    return result,use_html
 
-def apply_free_style(text, style):
-    """Apply text formatting without any API key."""
-    if not text or not style or style == "none": return text
-    lines = text.split('\n')
-    if style == "bold":
-        return '\n'.join(f"**{l}**" if l.strip() else l for l in lines)
-    elif style == "italic":
-        return '\n'.join(f"__{l}__" if l.strip() else l for l in lines)
-    elif style == "caps":
-        return text.upper()
-    elif style == "lower":
-        return text.lower()
-    elif style == "title":
-        return '\n'.join(l.title() for l in lines)
-    elif style == "clean":
-        text = re.sub(r' {2,}', ' ', text)
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        return text.strip()
-    elif style == "lines":
-        return '\n'.join(f"▪️ {l}" if l.strip() else l for l in lines)
-    elif style == "mono":
-        return f"`{text}`"
-    return text
-
-def apply_emoji(text, emoji_str, position):
-    """Add custom emoji to message."""
-    if not text or not emoji_str or position == "off": return text
-    e = emoji_str.strip()
+def apply_emoji(text,emoji_str,position):
+    if not text or not emoji_str or position=='off': return text
+    e=emoji_str.strip()
     if not e: return text
-    if position == "start":
-        return f"{e} {text}"
-    elif position == "end":
-        return f"{text} {e}"
-    elif position == "both":
-        return f"{e} {text} {e}"
-    elif position == "lines":
-        lines = text.split('\n')
-        return '\n'.join(f"{e} {l}" if l.strip() else l for l in lines)
+    if position=='start':  return f"{e} {text}"
+    elif position=='end':  return f"{text} {e}"
+    elif position=='both': return f"{e} {text} {e}"
+    elif position=='lines':return '\n'.join(f"{e} {l}" if l.strip() else l for l in text.split('\n'))
     return text
 
-async def ai_rewrite(text, ch):
-    if not text: return text
-
-    # ── FREE style ──
-    fs = ch.get('free_style', 'none')
-    if fs and fs != 'none':
-        text = apply_free_style(text, FREE_STYLES.get(fs, (None,None))[1])
-
-    # ── Emoji ──
-    emoji_str = ch.get('emoji_str', '')
-    emoji_pos = ch.get('emoji_pos', 'off')
-    if emoji_str and emoji_pos != 'off':
-        text = apply_emoji(text, emoji_str, emoji_pos)
-
-    # ── AI rewrite (needs API key) ──
-    style = ch.get('ai_style', 'none')
-    if style == 'none' or not ch.get('ai_on'): return text
-    prompt = ch.get('ai_prompt', '')
-    system = prompt if (style=='custom' and prompt) else (
-        f"Rewrite as: {AI_STYLES.get(style,('',''))[1]}. "
-        "Keep core info. Match original language. Return ONLY rewritten text."
-    )
+async def ai_rewrite(text,ch):
+    if not text: return text,False
+    use_html=False; styles_str=ch.get('free_style','none')
+    if styles_str and styles_str!='none': text,use_html=apply_styles(text,styles_str)
+    es=ch.get('emoji_str',''); ep=ch.get('emoji_pos','off')
+    if es and ep!='off': text=apply_emoji(text,es,ep)
+    style=ch.get('ai_style','none')
+    if style=='none' or not ch.get('ai_on'): return text,use_html
+    prompt=ch.get('ai_prompt','')
+    system=prompt if (style=='custom' and prompt) else (
+        f"Rewrite as: {AI_STYLES.get(style,('',''))[1]}. Keep core info. Return ONLY rewritten text.")
     try:
         import httpx
         async with httpx.AsyncClient(timeout=10) as cl:
-            r = await cl.post("https://api.anthropic.com/v1/messages",
+            r=await cl.post("https://api.anthropic.com/v1/messages",
                 headers={"x-api-key":CLAUDE_KEY,"anthropic-version":"2023-06-01","content-type":"application/json"},
                 json={"model":"claude-haiku-4-5-20251001","max_tokens":800,
                       "system":system,"messages":[{"role":"user","content":f"Rewrite:\n{text}"}]})
-            d = r.json()
-            if "content" in d: return d["content"][0]["text"].strip()
+            d=r.json()
+            if "content" in d: return d["content"][0]["text"].strip(),use_html
     except: pass
-    return text
+    return text,use_html
 
 # ═══════════════════════════════════════════════════════════════
-#   FORWARDING ENGINE
+#   LINK STRIPPER
 # ═══════════════════════════════════════════════════════════════
-ACL: dict = {}
-TSK: dict = {}
-# reply_map[uid][ch_id][src_msg_id] = dest_msg_id
-# Tracks which source message ID maps to which destination message ID
-# So reply chains are preserved in forwarded messages
-REPLY_MAP: dict = {}
+_TLDS=(r'com|net|org|in|co|io|info|biz|tv|me|online|live|site|web|app|pro'
+       r'|club|shop|store|tech|top|xyz|bet|win|casino|games|vip|to|cc|gg|uk|us|eu|au|pk|bd|lk|np')
+def strip_links(text,b_all,b_www,b_tme,b_at):
+    if not text: return text
+    if b_all or b_www:
+        text=re.sub(r'https?://\S+','',text,flags=re.IGNORECASE)
+        text=re.sub(r'www\.\S+','',text,flags=re.IGNORECASE)
+        text=re.sub(r'\b[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.(?:'+_TLDS+r')(?:/\S*)?\b','',text,flags=re.IGNORECASE)
+    if b_all or b_tme: text=re.sub(r't\.me/\S+','',text,flags=re.IGNORECASE)
+    if b_all or b_at:  text=re.sub(r'@[A-Za-z0-9_]+','',text)
+    text=re.sub(r'[ \t]{2,}',' ',text); text=re.sub(r'\n{3,}','\n\n',text)
+    return text.strip()
 
-async def _fwd(cl, msg, did, ch, repls, reply_to_msg_id=None):
+# ═══════════════════════════════════════════════════════════════
+#   ENGINE
+# ═══════════════════════════════════════════════════════════════
+ACL:dict={}; TSK:dict={}; REPLY_MAP:dict={}
+
+async def _fwd(cl,msg,did,ch,repls,reply_to_msg_id=None):
     try:
         try: did=int(did)
         except: pass
-        raw = msg.text or ""
-        for r in repls: raw=raw.replace(r['old_val'],r['new_val'])
-
-        # ── COMPREHENSIVE LINK BLOCKING ──────────────────────────
-        # Common TLDs for bare domain detection
-        _TLDS = (
-            r'com|net|org|in|co|io|info|biz|tv|me|online|live|site|web|app|pro'
-            r'|club|shop|store|tech|top|xyz|bet|win|casino|games|vip|to|cc|gg'
-            r'|uk|us|eu|au|pk|bd|lk|np'
-        )
-
-        def _strip(text, b_all, b_www, b_tme, b_at):
-            if not text: return text
-
-            if b_all or b_www:
-                # 1. https:// or http:// links (any domain, encoded URLs, emoji domains)
-                text = re.sub(r'https?://\S+', '', text, flags=re.IGNORECASE)
-                # 2. www. links
-                text = re.sub(r'www\.\S+', '', text, flags=re.IGNORECASE)
-                # 3. Bare domains like bharatwins.com, site.net, example.co.in
-                text = re.sub(
-                    r'\b[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?'
-                    r'\.(?:' + _TLDS + r')(?:/\S*)?\b',
-                    '', text, flags=re.IGNORECASE
-                )
-
-            if b_all or b_tme:
-                # t.me links including invite +links
-                text = re.sub(r't\.me/\S+', '', text, flags=re.IGNORECASE)
-
-            if b_all or b_at:
-                # @username mentions
-                text = re.sub(r'@[A-Za-z0-9_]+', '', text)
-
-            # Clean leftover spaces/lines
-            text = re.sub(r'[ \t]{2,}', ' ', text)
-            text = re.sub(r'\n{3,}', '\n\n', text)
-            return text.strip()
-
-        b_all = bool(ch.get('block_all_links') or ch.get('block_links'))
-        b_www = bool(ch.get('block_www'))
-        b_tme = bool(ch.get('block_tme'))
-        b_at  = bool(ch.get('block_at'))
-        doing_block = b_all or b_www or b_tme or b_at
-
-        if doing_block:
-            raw = _strip(raw, b_all, b_www, b_tme, b_at)
-
-        needs_transform = (
-            ch.get('free_style','none') != 'none' or
-            (ch.get('emoji_str','') and ch.get('emoji_pos','off') != 'off')
-        )
-        if needs_transform:
-            raw = await ai_rewrite(raw, ch)
-        if ch.get('fmt_clean'): raw = re.sub(r'\n{3,}','\n\n',raw).strip()
-        if ch.get('fmt_bold'):
+        raw=msg.text or ""
+        for r in repls:
+            if r['rtype'] in ('link','word'): raw=raw.replace(r['old_val'],r['new_val'])
+        b_all=bool(ch.get('block_all_links') or ch.get('block_links'))
+        b_www=bool(ch.get('block_www')); b_tme=bool(ch.get('block_tme')); b_at=bool(ch.get('block_at'))
+        if b_all or b_www or b_tme or b_at: raw=strip_links(raw,b_all,b_www,b_tme,b_at)
+        if raw:
+            raw=para_process(raw,ch['id'])
+            if raw is None: return None
+        use_html=False; styles_str=ch.get('free_style','none'); es=ch.get('emoji_str',''); ep=ch.get('emoji_pos','off')
+        if (styles_str and styles_str!='none') or (es and ep!='off'):
+            raw,use_html=await ai_rewrite(raw or '',ch)
+        if ch.get('fmt_clean') and raw: raw=re.sub(r'\n{3,}','\n\n',raw).strip()
+        if ch.get('fmt_bold') and raw:
             ls=raw.split('\n')
-            if ls and ls[0].strip(): ls[0]=f"**{ls[0].strip()}**"
+            if ls and ls[0].strip():
+                f=_he(ls[0].strip()) if use_html else ls[0].strip()
+                ls[0]=f"<b>{f}</b>" if use_html else f"**{f}**"
             raw='\n'.join(ls)
-
-        hdr=(ch.get('header') or '').strip()
-        ftr=(ch.get('footer') or '').strip()
-        if hdr: raw=f"{hdr}\n\n{raw}" if raw else hdr
-        if ftr: raw=f"{raw}\n\n{ftr}" if raw else ftr
+        hdr=(ch.get('header') or '').strip(); ftr=(ch.get('footer') or '').strip()
+        if hdr:
+            h,_=apply_styles(hdr,styles_str) if (styles_str and styles_str!='none') else (_he(hdr) if use_html else hdr,False)
+            raw=f"{h}\n\n{raw}" if raw else h
+        if ftr:
+            f2,_=apply_styles(ftr,styles_str) if (styles_str and styles_str!='none') else (_he(ftr) if use_html else ftr,False)
+            raw=f"{raw}\n\n{f2}" if raw else f2
         if ch.get('remove_cap'): raw=""
-
-        sil = bool(ch.get('silent'))
-
-        # ── DETECT MEDIA TYPE ─────────────────────────────────────
-        is_webpage = isinstance(getattr(msg, 'media', None), MessageMediaWebPage)
-        real_media = bool(msg.media and not is_webpage)
-
-        LOG.info(f"_fwd did={did} copy={ch.get('copy_mode')} real_media={real_media} is_wp={is_webpage} raw_len={len(raw)}")
-
-        # Detect sticker (don't add caption to stickers)
-        is_sticker = False
-        is_gif = False
-        if real_media and isinstance(msg.media, MessageMediaDocument):
-            doc = msg.media.document
-            if doc and hasattr(doc, 'attributes'):
+        parse_mode='html' if use_html else None; sil=bool(ch.get('silent'))
+        is_wp=isinstance(getattr(msg,'media',None),MessageMediaWebPage)
+        real_media=bool(msg.media and not is_wp)
+        is_sticker=False; is_gif=False; is_vidmsg=False
+        if real_media and isinstance(msg.media,MessageMediaDocument):
+            doc=msg.media.document
+            if doc and hasattr(doc,'attributes'):
                 for attr in doc.attributes:
-                    if isinstance(attr, DocumentAttributeSticker):
-                        is_sticker = True
-                    if isinstance(attr, DocumentAttributeAnimated):
-                        is_gif = True
-
+                    if isinstance(attr,DocumentAttributeSticker): is_sticker=True
+                    if isinstance(attr,DocumentAttributeAnimated): is_gif=True
+                    if isinstance(attr,DocumentAttributeVideo) and getattr(attr,'round_message',False): is_vidmsg=True
         if ch.get('copy_mode'):
             if real_media:
-                cap = (raw.strip() or None) if not (is_sticker or is_gif) else None
-                s = None
-                import os as _os
-
-                # Try 1: send_file with media reference
+                no_cap=(is_sticker or is_gif or is_vidmsg)
+                cap=(raw.strip() or None) if not no_cap else None
+                s=None; import os as _os
                 try:
-                    s = await cl.send_file(
-                        did, file=msg.media,
-                        caption=cap, silent=sil,
-                        buttons=None, reply_to=reply_to_msg_id,
-                    )
-                    LOG.info(f"✅ send_file OK {did}")
-                except Exception as e1:
-                    LOG.warning(f"send_file err: {e1}")
-
-                # Try 2: download to temp file → re-upload
+                    s=await cl.send_file(did,file=msg.media,caption=cap,silent=sil,reply_to=reply_to_msg_id,parse_mode=parse_mode)
+                except Exception as e1: LOG.warning(f"send_file err:{e1}")
                 if not s:
-                    tmp_path = f"tmp_{uid}_{did}.bin"
+                    tmp=f"tmp_{did}.bin"
                     try:
-                        await cl.download_media(msg, file=tmp_path)
-                        s = await cl.send_file(
-                            did, file=tmp_path,
-                            caption=cap, silent=sil,
-                            reply_to=reply_to_msg_id,
-                        )
-                        LOG.info(f"✅ dl+upload OK {did}")
-                    except Exception as e2:
-                        LOG.warning(f"dl+upload err: {e2}")
-                    try: _os.remove(tmp_path)
+                        await cl.download_media(msg,file=tmp)
+                        s=await cl.send_file(did,file=tmp,caption=cap,silent=sil,reply_to=reply_to_msg_id,parse_mode=parse_mode)
+                    except Exception as e2: LOG.warning(f"dl+upload err:{e2}")
+                    try: _os.remove(tmp)
                     except: pass
-
-                # Try 3: native forward (always works)
                 if not s:
-                    try:
-                        s = await cl.forward_messages(did, msg)
-                        LOG.info(f"✅ fwd fallback OK {did}")
-                    except Exception as e3:
-                        LOG.error(f"❌ ALL FAILED {did}: {e3}")
-                        return None
-
+                    try: s=await cl.forward_messages(did,msg)
+                    except Exception as e3: LOG.error(f"ALL FAILED {did}:{e3}"); return None
             elif raw.strip():
-                s = await cl.send_message(
-                    did, raw.strip(), silent=sil,
-                    link_preview=False, reply_to=reply_to_msg_id,
-                )
-            else:
-                return None
+                s=await cl.send_message(did,raw.strip(),silent=sil,link_preview=False,reply_to=reply_to_msg_id,parse_mode=parse_mode)
+            else: return None
         else:
-            # Forward mode — most reliable for all media
-            try:
-                s = await cl.forward_messages(did, msg)
-            except Exception as ef:
-                LOG.error(f"forward_messages: {ef}")
-                return None
-
+            try: s=await cl.forward_messages(did,msg)
+            except Exception as ef: LOG.error(f"fwd err:{ef}"); return None
         if ch.get('pin_msg') and s:
-            try: await cl.pin_message(did, s, notify=not sil)
+            try: await cl.pin_message(did,s,notify=not sil)
             except: pass
         return s
-    except Exception as e:
-        LOG.error(f"FWD→{did}: {e}"); return None
+    except Exception as e: LOG.error(f"FWD→{did}:{e}"); return None
 
 async def eng_start(uid):
-    sess = s_get(uid)
+    sess=s_get(uid)
     if not sess: return False
     await eng_stop(uid)
     try:
-        # ✅ Proper connection settings for stable long-running session
-        cl = TelegramClient(
-            StringSession(sess),
-            API_ID, API_HASH,
-            connection_retries=None,   # retry forever
-            retry_delay=5,             # 5 sec between retries
-            auto_reconnect=True,       # auto reconnect on disconnect
-            request_retries=5,         # retry failed requests
-        )
+        cl=TelegramClient(StringSession(sess),API_ID,API_HASH,connection_retries=None,retry_delay=5,auto_reconnect=True,request_retries=5)
         await cl.connect()
-
         if not await cl.is_user_authorized():
-            # Don't delete session on temp failure — try reconnecting first
-            LOG.warning(f"Auth check failed uid={uid} — retrying in 5s")
             await asyncio.sleep(5)
             try:
                 await cl.connect()
-                if await cl.is_user_authorized():
-                    LOG.info(f"Auth recovered uid={uid}")
-                else:
-                    LOG.warning(f"Session truly expired uid={uid}")
-                    s_del(uid)
-                    await cl.disconnect()
-                    return False
-            except:
-                LOG.warning(f"Retry failed uid={uid} — keeping session, will retry later")
-                await cl.disconnect()
-                return False
-
-        # Save fresh session immediately after connect
-        s_save(uid, cl.session.save())
-        ACL[uid] = cl
-
-        chs = ch_all(uid)
+                if not await cl.is_user_authorized(): s_del(uid); await cl.disconnect(); return False
+            except: await cl.disconnect(); return False
+        s_save(uid,cl.session.save()); ACL[uid]=cl
+        chs=ch_all(uid)
         if not chs: return True
-        sm = {}
+        sm={}
         for ch in chs:
             if not ch['enabled']: continue
-            try: k = int(ch['src_id'])
-            except: k = ch['src_id']
-            sm.setdefault(k, []).append(ch)
+            try: k=int(ch['src_id'])
+            except: k=ch['src_id']
+            sm.setdefault(k,[]).append(ch)
         if not sm: return True
 
         @cl.on(events.NewMessage(chats=list(sm.keys())))
         async def handler(ev):
             try:
                 if not u_bot_on(uid) or not u_ok(uid): return
-                matched = sm.get(ev.chat_id,[]) or sm.get(str(ev.chat_id),[])
+                matched=sm.get(ev.chat_id,[]) or sm.get(str(ev.chat_id),[])
                 for _ch_stale in matched:
                     try:
-                        ch = ch_get(_ch_stale['id'])
+                        ch=ch_get(_ch_stale['id'])
                         if not ch or not ch['enabled']: continue
                         if ch.get('dup_check') and l_dup(ch['id'],ev.message.id,str(ev.chat_id)): continue
-                        txt = (ev.message.text or "").lower()
-                        has_real_media = (bool(ev.message.media) and not isinstance(ev.message.media, MessageMediaWebPage))
-                        if ch.get('media_only') and not has_real_media: continue
-                        if ch.get('text_only') and has_real_media: continue
-                        if not has_real_media:
-                            fils = f_get(ch['id'])
-                            if txt and any(f['val'].lower() in txt for f in fils if f['ftype']=='blacklist'): continue
-                            wl = [f for f in fils if f['ftype']=='whitelist']
-                            if wl and txt and not any(f['val'].lower() in txt for f in wl): continue
-                        repls = rp_get(ch['id']); dests = json.loads(ch['dests']); cnt = 0
-                        src_reply_id = None
+                        is_wp2=isinstance(getattr(ev.message,'media',None),MessageMediaWebPage)
+                        has_real=bool(ev.message.media and not is_wp2)
+                        # ── Per-type media block ──
+                        if has_real:
+                            mtype=detect_media_type(ev.message)
+                            if is_media_blocked(ch,mtype): continue
+                        if ch.get('media_only') and not has_real: continue
+                        if ch.get('text_only') and has_real: continue
+                        # ── Text filters ──
+                        txt=(ev.message.text or "").lower()
+                        if not has_real:
+                            fils=f_get(ch['id'])
+                            bl2=[f for f in fils if f['ftype']=='blacklist']
+                            wl2=[f for f in fils if f['ftype']=='whitelist']
+                            if txt and any(f['val'].lower() in txt for f in bl2): continue
+                            if wl2 and txt and not any(f['val'].lower() in txt for f in wl2): continue
+                        repls=rp_get(ch['id']); dests=json.loads(ch['dests']); cnt=0
+                        src_rep=None
                         if ev.message.reply_to and hasattr(ev.message.reply_to,'reply_to_msg_id'):
-                            src_reply_id = ev.message.reply_to.reply_to_msg_id
+                            src_rep=ev.message.reply_to.reply_to_msg_id
                         for d in dests:
                             try:
-                                reply_to_in_dest = None
-                                if src_reply_id:
-                                    rmap = REPLY_MAP.get(uid,{}).get(ch['id'],{}).get(d['id'],{})
-                                    reply_to_in_dest = rmap.get(src_reply_id)
-                                r = await _fwd(cl,ev.message,d['id'],ch,repls,reply_to_msg_id=reply_to_in_dest)
+                                rtid=None
+                                if src_rep:
+                                    rmap=REPLY_MAP.get(uid,{}).get(ch['id'],{}).get(d['id'],{})
+                                    rtid=rmap.get(src_rep)
+                                r=await _fwd(cl,ev.message,d['id'],ch,repls,reply_to_msg_id=rtid)
                                 if r:
-                                    cnt += 1
-                                    ds = str(d['id'])
+                                    cnt+=1; ds=str(d['id'])
                                     REPLY_MAP.setdefault(uid,{}).setdefault(ch['id'],{}).setdefault(ds,{})
-                                    REPLY_MAP[uid][ch['id']][ds][ev.message.id] = r.id
-                                    rm2 = REPLY_MAP[uid][ch['id']][ds]
+                                    REPLY_MAP[uid][ch['id']][ds][ev.message.id]=r.id
+                                    rm2=REPLY_MAP[uid][ch['id']][ds]
                                     if len(rm2)>500:
-                                        for k in list(rm2.keys())[:100]: del rm2[k]
-                            except Exception as de: LOG.warning(f"dest err {d['id']}: {de}")
+                                        for k2 in list(rm2.keys())[:100]: del rm2[k2]
+                            except Exception as de: LOG.warning(f"dest err {d['id']}:{de}")
                             if ch.get('delay_sec',0)>0: await asyncio.sleep(ch['delay_sec'])
                         if cnt: l_add(uid,ch['id'],ev.message.id,str(ev.chat_id)); u_inc(uid,cnt)
-                    except Exception as ce: LOG.warning(f"ch handler err uid={uid}: {ce}")
-            except Exception as he: LOG.warning(f"handler err uid={uid}: {he}")
+                    except Exception as ce: LOG.warning(f"ch err uid={uid}:{ce}")
+            except Exception as he: LOG.warning(f"handler err uid={uid}:{he}")
 
         async def keep_alive():
             while uid in ACL:
                 try:
                     await asyncio.sleep(3*3600)
                     if uid not in ACL: break
-                    c = ACL.get(uid)
-                    if c:
-                        if not c.is_connected(): await c.connect()
-                        if await c.is_user_authorized():
-                            s_save(uid, c.session.save())
-                            LOG.info(f"✅ Session alive uid={uid}")
+                    c2=ACL.get(uid)
+                    if c2 and await c2.is_user_authorized(): s_save(uid,c2.session.save())
                 except asyncio.CancelledError: break
-                except Exception as e: LOG.warning(f"keep_alive uid={uid}: {e}")
+                except Exception as e: LOG.warning(f"keep_alive uid={uid}:{e}")
         asyncio.create_task(keep_alive())
 
         async def runner():
-            fails = 0
+            fails=0
             while True:
-                try:
-                    await cl.run_until_disconnected()
-                    fails = 0
+                try: await cl.run_until_disconnected(); fails=0
                 except asyncio.CancelledError: break
                 except Exception as e:
-                    fails += 1
-                    wait = min(5*fails, 60)
-                    LOG.warning(f"Engine uid={uid} err#{fails}: {e} wait={wait}s")
-                    await asyncio.sleep(wait)
+                    fails+=1; await asyncio.sleep(min(5*fails,60))
                 if uid not in ACL: break
                 try:
                     if not cl.is_connected(): await cl.connect()
-                    if await cl.is_user_authorized():
-                        s_save(uid, cl.session.save()); fails=0
-                        LOG.info(f"✅ Engine uid={uid} reconnected"); continue
+                    if await cl.is_user_authorized(): s_save(uid,cl.session.save()); fails=0; continue
                 except: pass
-                if fails >= 5:
-                    LOG.info(f"Engine uid={uid} full restart")
-                    asyncio.create_task(eng_start(uid)); break
+                if fails>=5: asyncio.create_task(eng_start(uid)); break
 
-                TSK[uid]=asyncio.create_task(runner())
-        LOG.info(f"✅ Engine uid={uid}")
-        return True
-    except Exception as e: LOG.error(f"eng_start {uid}: {e}"); return False
+        TSK[uid]=asyncio.create_task(runner())
+        LOG.info(f"✅ Engine uid={uid}"); return True
+    except Exception as e: LOG.error(f"eng_start {uid}:{e}"); return False
 
 async def eng_stop(uid):
     t=TSK.pop(uid,None)
@@ -798,100 +743,107 @@ async def eng_restart_all():
 # ═══════════════════════════════════════════════════════════════
 #   UI HELPERS
 # ═══════════════════════════════════════════════════════════════
-def B(t,c): return IB(t, callback_data=c)
+def B(t,c): return IB(t,callback_data=c)
 def KB(*rows): return IM(list(rows))
 def OO(v): return "🟢" if v else "🔴"
-def EE(v): return "✅" if v else "☐"
 
-# ── MAIN MENU — compact ────────────────────────────────────────
 def KB_MAIN(uid):
+    eng=uid in ACL; on=u_bot_on(uid)
+    st="🟢 Running" if (on and eng) else ("🔴 Paused" if on else "⛔ Bot Off")
+    return IM([
+        [B(f"{st}  •  {BOT_NAME}","noop")],
+        [B("📡 My Channels","chs"),   B("⚙️ Settings","settings")],
+        [B("📊 Statistics","stats"),  B("💳 Subscription","sub")],
+        [B("🆘 Support","support"),   B("🚪 Logout","logout")],
+    ])
+
+def KB_SETTINGS(uid):
     on=u_bot_on(uid); eng=uid in ACL
     return IM([
-        [B(f"{'🟢 Running' if on and eng else '🔴 Paused'}  •  {BOT_NAME}","noop")],
-        [B("📡 Channels","chs"),         B("⚙️ Settings","ctrl_g")],
-        [B("✨ Text Style","ai_g"),      B("🔄 Replace","repl_g")],
-        [B("📊 Stats","stats"),           B("💳 Subscription","sub")],
-        [B(f"{OO(on)} Bot","bot_tog"),   B(f"{'⚡ Engine' if eng else '⛔ Engine'}","eng_r")],
-        [B("🆘 Support","support"),       B("🚪 Logout","logout")],
+        [B("⚙️ Settings Panel","noop")],
+        [B(f"{OO(on)} Bot {'ON' if on else 'OFF'}","bot_tog"),
+         B(f"{'⚡ Engine ON' if eng else '⛔ Engine OFF'}","eng_r")],
+        [B("✨ Text Style","ai_g"),  B("🔄 Replace","repl_g")],
+        [B("📐 Format","fmt_g"),    B("🗂 All Channels","ctrl_g")],
+        [B("‹ Back","main")],
     ])
 
-# ── ADMIN — compact ────────────────────────────────────────────
-def KB_ADM():
-    tu,au,tf,tr,tb,td,nw = adm_stats()
-    return IM([
-        [B(f"🔧 Admin  •  {tu}👥  {au}✅  {tb}🚫","noop")],
-        [B(f"📨 {tf} fwd  •  📅 {td} today  •  🆕 {nw}/7d","noop")],
-        [B("👥 Users","a_users"),          B("✅ Active","a_active")],
-        [B("✅ Give Sub","a_give"),         B("❌ Revoke","a_revoke")],
-        [B("🚫 Ban","a_ban"),               B("✅ Unban","a_unban")],
-        [B("🔍 Search","a_search")],
-        [B("📢 Broadcast All","a_bc_all"),  B("📢 Active Only","a_bc_act")],
-        [B("📊 Stats","a_stats"),           B("📡 Channels","a_chs")],
-        [B("💰 Revenue","a_revenue"),       B("🔄 Restart All","a_restart")],
-        [B("💳 Plan Management","a_plans")],
-    ])
-
-# ── PLAN MANAGEMENT KEYBOARD ────────────────────────────────────
-def KB_PLANS():
-    plans = plan_all()
-    trial = get_trial_days()
-    rows = [
-        [B("💳 Plan Management","noop")],
-        [B(f"🎁 Trial Days: {trial}  (tap to change)","a_trial")],
-        [B("─────────────────────","noop")],
-    ]
-    for p in plans:
-        status = "🟢" if p['enabled'] else "🔴"
-        rows.append([
-            B(f"{status} {p['label']}  ₹{p['price']}  {p['days']}d", f"a_plan_edit_{p['key']}"),
-            B("🔴" if p['enabled'] else "🟢", f"a_plan_tog_{p['key']}"),
-            B("🗑", f"a_plan_del_{p['key']}"),
-        ])
-    rows.append([B("➕ Add New Plan","a_plan_add")])
-    rows.append([B("‹ Back","adm")])
-    return IM(rows)
-
-# ── CHANNELS ───────────────────────────────────────────────────
 def KB_CHS(uid):
     chs=ch_all(uid); rows=[]
+    cur,mx=u_channel_limit(uid); lt=f"  [{cur}/{mx}]" if mx>0 else ""
+    rows.append([B(f"📡 My Channels{lt}","noop")])
     for ch in chs:
         on="🟢" if ch['enabled'] else "🔴"
-        ai="🤖" if ch['ai_on'] else ""
         dests=json.loads(ch['dests'])
         rows.append([
-            B(f"{on}{ai} {ch['ch_name'][:20]} ({len(dests)}▶)",f"ch_{ch['id']}"),
-            B("⚙",f"ctrl_{ch['id']}"), B("🗑",f"ch_del_{ch['id']}"),
+            B(f"{on} {ch['ch_name'][:20]} ({len(dests)}▶)",f"ch_{ch['id']}"),
+            B("⚙",f"ctrl_{ch['id']}"),B("🗑",f"ch_del_{ch['id']}"),
         ])
     if not chs: rows.append([B("No channels yet","noop")])
-    rows.append([B("➕ Add Channel","ch_new"), B("‹ Back","main")])
-    return IM(rows)
+    rows.append([B("➕ Add Channel","ch_new"),B("‹ Back","main")]); return IM(rows)
 
-# ── CHANNEL ────────────────────────────────────────────────────
 def KB_CH(cid):
     if not ch_get(cid): return KB([B("❌ Not found","noop"),B("‹ Back","chs")])
     ch=ch_get(cid); dests=json.loads(ch['dests'])
-    ball = bool(ch.get('block_all_links') or ch.get('block_links'))
-    bat  = bool(ch.get('block_at'))
+    ball=bool(ch.get('block_all_links') or ch.get('block_links')); bat=bool(ch.get('block_at'))
+    blk_count=sum(1 for _,(lbl,col) in MEDIA_TYPES.items() if ch.get(col))
+    blk_info=f"🔴 {blk_count} Blocked" if blk_count else "✅ All Allowed"
     return IM([
         [B(f"{'🟢' if ch['enabled'] else '🔴'} {ch['ch_name'][:28]}",f"ch_tog_{cid}")],
         [B(f"📤 {len(dests)} dest",f"dests_{cid}"),  B("⚙️ Control",f"ctrl_{cid}")],
-        [B("✨ Style",f"ai_{cid}"),                     B("🔄 Replace",f"repls_{cid}")],
-        [B("✂️ Filters",f"flt_{cid}"),                B("📐 Format",f"fmt_{cid}")],
+        [B("✨ Style",f"ai_{cid}"),                   B("🔄 Replace",f"repls_{cid}")],
+        [B("✂️ Filters",f"flt_{cid}"),               B("📐 Format",f"fmt_{cid}")],
+        [B(f"📹 Media  [{blk_info}]",f"media_{cid}")],
         [B(f"{'🔴 Links Blocked' if ball else '⚪ Block Links'}",f"t_ball_{cid}"),
-         B(f"{'🔴 @User Blocked' if bat  else '⚪ Block @User'}",f"t_bat_{cid}")],
-        [B("✏️ Rename",f"ch_ren_{cid}"),               B("📊 Stats",f"ch_stat_{cid}")],
-        [B("‹ Channels","chs"),                        B("🏠 Home","main")],
+         B(f"{'🔴 @Blocked' if bat else '⚪ Block @User'}",f"t_bat_{cid}")],
+        [B("✏️ Rename",f"ch_ren_{cid}"),             B("📊 Stats",f"ch_stat_{cid}")],
+        [B("‹ Channels","chs"),                      B("🏠 Home","main")],
     ])
 
-# ── CONTROL PANEL ──────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+#   MEDIA CONTROL PANEL — Individual toggles per type
+# ═══════════════════════════════════════════════════════════════
+def KB_MEDIA(cid):
+    ch=ch_get(cid)
+    if not ch: return KB([B("❌ Not found","noop"),B("‹ Back","chs")])
+
+    rows=[
+        [B(f"📹 Media Control  •  {ch['ch_name'][:20]}","noop")],
+        [B("🟢 = Allowed  |  🔴 = Blocked","noop")],
+        [B("Tap any button to toggle ↕️","noop")],
+        [B("──────────────────────────────","noop")],
+    ]
+
+    for group_header, type_keys in MEDIA_GROUPS:
+        rows.append([B(group_header,"noop")])
+        for mkey in type_keys:
+            mlabel, mcol = MEDIA_TYPES[mkey]
+            is_blocked = bool(ch.get(mcol, 0))
+            # Show current state clearly + what happens on tap
+            if is_blocked:
+                btn_text = f"🔴 {mlabel}  ← tap to ALLOW"
+            else:
+                btn_text = f"🟢 {mlabel}  ← tap to BLOCK"
+            rows.append([B(btn_text, f"mt_{cid}_{mcol}")])
+
+    rows.append([B("──────────────────────────────","noop")])
+    rows.append([
+        B("🚫 Block ALL","media_blkall_{cid}".replace("{cid}",str(cid))),
+        B("✅ Allow ALL","media_alwall_{cid}".replace("{cid}",str(cid))),
+    ])
+    rows.append([B("‹ Back",f"ch_{cid}"),B("🏠 Home","main")])
+    return IM(rows)
+
 def KB_CTRL(cid):
     ch=ch_get(cid)
     if not ch: return KB([B("❌ Not found","noop"),B("‹ Back","chs")])
-    ball = bool(ch.get('block_all_links') or ch.get('block_links'))
-    bat  = bool(ch.get('block_at'))
+    ball=bool(ch.get('block_all_links') or ch.get('block_links')); bat=bool(ch.get('block_at'))
+    hdr_t=f"📝 Hdr: {_short(ch.get('header',''),15)}" if ch.get('header') else "📝 Header —"
+    ftr_t=f"📝 Ftr: {_short(ch.get('footer',''),15)}" if ch.get('footer') else "📝 Footer —"
+    blk_count=sum(1 for _,(lbl,col) in MEDIA_TYPES.items() if ch.get(col))
     return IM([
         [B(f"⚙️ {ch['ch_name'][:28]}","noop")],
-        [B(f"{OO(ch['copy_mode'])} Copy Mode",   f"t_copy_{cid}"),
+        [B(f"{OO(ch['copy_mode'])} Copy Mode",  f"t_copy_{cid}"),
          B(f"{OO(ch['silent'])} Silent",          f"t_sil_{cid}")],
         [B(f"{OO(ch['pin_msg'])} Pin",            f"t_pin_{cid}"),
          B(f"{OO(ch['remove_cap'])} No Caption",  f"t_cap_{cid}")],
@@ -899,738 +851,383 @@ def KB_CTRL(cid):
          B(f"{OO(ch['text_only'])} Text Only",    f"t_txt_{cid}")],
         [B(f"{OO(ch['dup_check'])} Dup Check",    f"t_dup_{cid}"),
          B(f"{OO(ch['enabled'])} Enable",          f"ch_tog_{cid}")],
-        [B(f"⏱ Delay: {ch['delay_sec']}s",        f"s_dly_{cid}"),
-         B(f"📝 Header {'✅' if ch['header'] else '—'}",f"s_hdr_{cid}")],
-        [B(f"📝 Footer {'✅' if ch['footer'] else '—'}",f"s_ftr_{cid}")],
-        [B("── QUICK BLOCK ──","noop")],
-        [B(f"{'🔴 Block ALL Links  ON' if ball else '⚪ Block ALL Links  OFF'}",f"t_ball_{cid}")],
-        [B(f"{'🔴 Block @Username  ON' if bat  else '⚪ Block @Username  OFF'}",f"t_bat_{cid}")],
-        [B("✨ Style",f"ai_{cid}"),  B("🔄 Replace",f"repls_{cid}"),  B("✂️ Filters",f"flt_{cid}")],
-        [B("‹ Back",f"ch_{cid}"), B("🏠 Home","main")],
+        [B(f"⏱ Delay: {ch['delay_sec']}s",        f"s_dly_{cid}")],
+        [B(hdr_t,f"s_hdr_{cid}"),B(ftr_t,f"s_ftr_{cid}")],
+        [B(f"{'🔴 Block ALL Links ON' if ball else '⚪ Block ALL Links OFF'}",f"t_ball_{cid}")],
+        [B(f"{'🔴 Block @Username ON' if bat  else '⚪ Block @Username OFF'}",f"t_bat_{cid}")],
+        [B(f"📹 Media [{blk_count} blocked]",f"media_{cid}"),
+         B("✨ Style",f"ai_{cid}"),B("✂️ Filters",f"flt_{cid}")],
+        [B("‹ Back",f"ch_{cid}"),B("🏠 Home","main")],
     ])
 
 def KB_CTRL_G(uid):
     on=u_bot_on(uid); eng=uid in ACL; chs=ch_all(uid)
     on_c=sum(1 for c in chs if c['enabled'])
     return IM([
-        [B(f"{OO(on)} Bot","bot_tog"), B(f"{'⚡ ON' if eng else '⛔ OFF'} Engine","eng_r")],
+        [B(f"{OO(on)} Bot","bot_tog"),B(f"{'⚡ ON' if eng else '⛔ OFF'} Engine","eng_r")],
         [B(f"📡 {len(chs)} channels  •  🟢 {on_c} active","noop")],
-        [B("📡 Channels","chs"), B("‹ Back","main")],
+        [B("📡 Channels","chs"),B("‹ Back","settings")],
     ])
 
-# ── TEXT STYLE ─────────────────────────────────────────────────
-def KB_AI(cid):
-    ch  = ch_get(cid)
-    fs  = ch.get('free_style','none')
-    ep  = ch.get('emoji_pos','off')
-    es  = ch.get('emoji_str','') or '—'
-    rows = [
-        [B(f"✨ Text Style  •  {ch['ch_name'][:22]}","noop")],
-        # ── Text Format ──
-        [B("── 📝 Text Format ──","noop")],
+def KB_FLT(cid):
+    ch=ch_get(cid)
+    if not ch: return KB([B("❌ Not found","noop"),B("‹ Back","chs")])
+    fils=f_get(cid)
+    wl=[f for f in fils if f['ftype']=='whitelist']
+    bl=[f for f in fils if f['ftype']=='blacklist']
+    pbl=[f for f in fils if f['ftype']=='para_block']
+    all_on=bool(ch.get('block_all_links') or ch.get('block_links'))
+    www_on=bool(ch.get('block_www')); tme_on=bool(ch.get('block_tme')); at_on=bool(ch.get('block_at'))
+    rows=[
+        [B(f"✂️ Filters  •  {ch['ch_name'][:20]}","noop")],
+        [B("─── 🔗 LINK BLOCKING ───","noop")],
+        [B(f"{'🔴 BLOCK ALL LINKS ✅ ON' if all_on else '⚪ BLOCK ALL LINKS ❌ OFF'}",f"t_ball_{cid}")],
+        [B(f"{OO(www_on)} http/https/www/domains",f"t_bwww_{cid}")],
+        [B(f"{OO(tme_on)} t.me Links",f"t_btme_{cid}")],
+        [B("─── 👤 @USERNAME ───","noop")],
+        [B(f"{OO(at_on)} @username Mentions",f"t_bat_{cid}")],
+        [B("─── ✅ WHITELIST (Forward IF contains) ───","noop")],
     ]
-    for k,(label,_) in FREE_STYLES.items():
-        tick = "✅ " if fs==k else ""
-        rows.append([B(f"{tick}{label}", f"fs_set_{cid}_{k}")])
-    # ── Emoji ──
-    rows.append([B("── 😊 Emoji Settings ──","noop")])
-    rows.append([B(f"Emoji: {es}  (tap to set)",f"emoji_set_{cid}")])
-    rows.append([B("── Position ──","noop")])
-    for pk, plabel in EMOJI_POS.items():
-        tick = "✅ " if ep==pk else ""
-        rows.append([B(f"{tick}{plabel}", f"emoji_pos_{cid}_{pk}")])
-    rows.append([B("🗑 Clear Emoji",f"emoji_clr_{cid}")])
-    rows.append([B("‹ Back",f"ch_{cid}"), B("🏠 Home","main")])
+    for f in wl: rows.append([B(f"✅ {f['val'][:30]}","noop"),B("🗑",f"d_flt_{f['id']}")])
+    rows.append([B("➕ Add Whitelist",f"add_wl_{cid}")])
+    rows.append([B("─── 🚫 BLACKLIST (Skip IF contains) ───","noop")])
+    for f in bl: rows.append([B(f"🚫 {f['val'][:30]}","noop"),B("🗑",f"d_flt_{f['id']}")])
+    rows.append([B("➕ Add Blacklist",f"add_bl_{cid}")])
+    rows.append([B("─── 📝 PARA BLOCK (Remove paragraph) ───","noop")])
+    rows.append([B("💡 Word milne pe sirf WO paragraph delete","noop")])
+    for f in pbl: rows.append([B(f"📝 {f['val'][:30]}","noop"),B("🗑",f"d_flt_{f['id']}")])
+    rows.append([B("➕ Add Para Block",f"add_pb_{cid}")])
+    rows.append([B("‹ Back",f"ch_{cid}"),B("🏠 Home","main")])
     return IM(rows)
 
-def KB_AI_G(uid):
-    chs = ch_all(uid)
-    rows = [
-        [B("✨ Text Style","noop")],
-        [B("🌐 Change ALL Channels Style","ai_g_all")],
-        [B("─── Individual Channels ───","noop")],
-    ]
-    for ch in chs:
-        fs = ch.get('free_style','none')
-        label = FREE_STYLES.get(fs,("❌ Off",))[0]
-        rows.append([B(f"{ch['ch_name'][:24]} — {label}", f"ai_{ch['id']}")])
-    if not chs: rows.append([B("No channels — Add first","ch_new")])
-    rows.append([B("‹ Back","main")])
-    return IM(rows)
-
-def KB_AI_GLOBAL(uid):
-    """Style picker for ALL channels at once"""
-    rows = [[B("🌐 Change ALL Channels Style","noop")]]
-    for k,(label,_) in FREE_STYLES.items():
-        rows.append([B(label, f"ai_g_set_{k}")])
-    rows.append([B("‹ Back","ai_g")])
-    return IM(rows)
-
-# ── REPLACEMENTS ───────────────────────────────────────────────
 def KB_REPLS(cid):
-    ch=ch_get(cid); lrp=rp_get(cid,'link'); wrp=rp_get(cid,'word')
+    ch=ch_get(cid)
+    lrp=rp_get(cid,'link'); wrp=rp_get(cid,'word'); prp=rp_get(cid,'para')
     rows=[[B(f"🔄 {ch['ch_name'][:26]}","noop")]]
-    rows.append([B(f"🔗 Link ({len(lrp)})","noop")])
+    rows.append([B(f"🔗 Link Replace ({len(lrp)})","noop")])
     for r in lrp: rows.append([B(f"🔗 {r['old_val'][:18]}→{r['new_val'][:12]}","noop"),B("🗑",f"d_rp_{r['id']}")])
     rows.append([B("➕ Add Link Replace",f"add_lrp_{cid}")])
-    rows.append([B(f"📝 Word ({len(wrp)})","noop")])
+    rows.append([B(f"📝 Word Replace ({len(wrp)})","noop")])
     for r in wrp: rows.append([B(f"📝 {r['old_val'][:18]}→{r['new_val'][:12]}","noop"),B("🗑",f"d_rp_{r['id']}")])
     rows.append([B("➕ Add Word Replace",f"add_wrp_{cid}")])
-    rows.append([B("‹ Back",f"ch_{cid}"), B("🏠 Home","main")])
-    return IM(rows)
+    rows.append([B(f"📋 Para Replace ({len(prp)})","noop")])
+    rows.append([B("💡 Para mein word mile → pura para replace","noop")])
+    for r in prp:
+        nv="[DELETE]" if (not r['new_val'] or r['new_val']=='-') else r['new_val'][:15]
+        rows.append([B(f"📋 '{r['old_val'][:12]}' → {nv}","noop"),B("🗑",f"d_rp_{r['id']}")])
+    rows.append([B("➕ Add Para Replace",f"add_prp_{cid}")])
+    rows.append([B("‹ Back",f"ch_{cid}"),B("🏠 Home","main")]); return IM(rows)
 
 def KB_REPL_G(uid):
     chs=ch_all(uid); rows=[[B("🔄 Replacements","noop")]]
     for ch in chs:
-        lc=len(rp_get(ch['id'],'link')); wc=len(rp_get(ch['id'],'word'))
-        rows.append([B(f"📡 {ch['ch_name'][:22]}  🔗{lc} 📝{wc}",f"repls_{ch['id']}")])
+        lc=len(rp_get(ch['id'],'link')); wc=len(rp_get(ch['id'],'word')); pc=len(rp_get(ch['id'],'para'))
+        rows.append([B(f"📡 {ch['ch_name'][:22]}  🔗{lc} 📝{wc} 📋{pc}",f"repls_{ch['id']}")])
     if not chs: rows.append([B("No channels!","ch_new")])
-    rows.append([B("‹ Back","main")])
-    return IM(rows)
+    rows.append([B("‹ Back","settings")]); return IM(rows)
 
-# ── FILTERS ────────────────────────────────────────────────────
-def KB_FLT(cid):
-    ch = ch_get(cid)
-    if not ch: return KB([B("❌ Channel not found","noop"), B("‹ Back","chs")])
-    fils=f_get(cid)
-    wl=[f for f in fils if f['ftype']=='whitelist']
-    bl=[f for f in fils if f['ftype']=='blacklist']
-    all_on  = bool(ch.get('block_all_links') or ch.get('block_links'))
-    www_on  = bool(ch.get('block_www'))
-    tme_on  = bool(ch.get('block_tme'))
-    at_on   = bool(ch.get('block_at'))
-    return IM([
-        [B(f"✂️ Filters  •  {ch['ch_name'][:20]}","noop")],
-
-        [B("─── 🔗 LINK BLOCKING ───","noop")],
-        # Master toggle
-        [B(f"{'🔴 BLOCK ALL LINKS  ✅ ON' if all_on else '⚪ BLOCK ALL LINKS  ❌ OFF'}",
-           f"t_ball_{cid}")],
-        [B("─ Individual Link Controls ─","noop")],
-        # http/www/bare domains — ONE button
-        [B(f"{OO(www_on)} http • https • www • .com/.net etc",f"t_bwww_{cid}")],
-        # t.me links
-        [B(f"{OO(tme_on)} t.me Links  (invite/channel/post)",f"t_btme_{cid}")],
-
-        [B("─── 👤 USERNAME BLOCKING ───","noop")],
-        # @username — completely separate
-        [B(f"{OO(at_on)} @username Mentions  (@abc, @xyz)",f"t_bat_{cid}")],
-
-        [B("─── ✅ WHITELIST (Forward IF contains) ───","noop")],
-        *[[B(f"✅ {f['val'][:30]}","noop"),B("🗑",f"d_flt_{f['id']}")] for f in wl],
-        [B("➕ Add Whitelist",f"add_wl_{cid}")],
-
-        [B("─── 🚫 BLACKLIST (Skip IF contains) ───","noop")],
-        *[[B(f"🚫 {f['val'][:30]}","noop"),B("🗑",f"d_flt_{f['id']}")] for f in bl],
-        [B("➕ Add Blacklist",f"add_bl_{cid}")],
-
-        [B("‹ Back",f"ch_{cid}"), B("🏠 Home","main")],
-    ])
-
-# ── FORMAT ─────────────────────────────────────────────────────
 def KB_FMT(cid):
     ch=ch_get(cid)
+    hp=f"📝 Hdr: {_short(ch.get('header',''),18)}" if ch.get('header') else "📝 Header: —"
+    fp=f"📝 Ftr: {_short(ch.get('footer',''),18)}" if ch.get('footer') else "📝 Footer: —"
     return IM([
         [B(f"📐 Format  •  {ch['ch_name'][:20]}","noop")],
-        [B(f"{OO(ch['fmt_bold'])} Bold Title",   f"t_bold_{cid}"),
-         B(f"{OO(ch['fmt_clean'])} Clean Text",  f"t_clean_{cid}")],
-        [B(f"{OO(ch['block_links'])} No Links",  f"t_blk_{cid}"),
-         B(f"{OO(ch['remove_cap'])} No Caption", f"t_cap_{cid}")],
-        [B(f"📝 Header {'✅' if ch['header'] else '—'}",f"s_hdr_{cid}"),
-         B(f"📝 Footer {'✅' if ch['footer'] else '—'}",f"s_ftr_{cid}")],
-        [B("🤖 AI Style",f"ai_{cid}")],
-        [B("‹ Back",f"ch_{cid}"), B("🏠 Home","main")],
+        [B(f"{OO(ch['fmt_bold'])} Bold Title",  f"t_bold_{cid}"),
+         B(f"{OO(ch['fmt_clean'])} Clean Text", f"t_clean_{cid}")],
+        [B(f"{OO(ch['block_links'])} No Links", f"t_blk_{cid}"),
+         B(f"{OO(ch['remove_cap'])} No Caption",f"t_cap_{cid}")],
+        [B(hp,f"s_hdr_{cid}")],[B(fp,f"s_ftr_{cid}")],
+        [B("✨ Text Style",f"ai_{cid}")],
+        [B("‹ Back",f"ch_{cid}"),B("🏠 Home","main")],
     ])
 
-# ── DESTINATIONS ───────────────────────────────────────────────
+def KB_FMT_G(uid):
+    chs=ch_all(uid); rows=[[B("📐 Format","noop")]]
+    for ch in chs: rows.append([B(f"📡 {ch['ch_name'][:28]}",f"fmt_{ch['id']}")])
+    if not chs: rows.append([B("No channels","ch_new")])
+    rows.append([B("‹ Back","settings")]); return IM(rows)
+
+def KB_AI(cid):
+    ch=ch_get(cid); active=parse_style_set(ch.get('free_style','none'))
+    ep=ch.get('emoji_pos','off'); es=ch.get('emoji_str','') or '—'
+    rows=[[B(f"✨ Text Style  •  {ch['ch_name'][:22]}","noop")],
+          [B("── Tap to toggle (multi-select allowed) ──","noop")]]
+    for key,label in [("bold","𝗕𝗼𝗹𝗱"),("italic","𝘐𝘵𝘢𝘭𝘪𝗰"),("bold_italic","𝗕+𝘐 Bold+Italic ⚡"),
+                       ("caps","CAPS"),("lower","lowercase"),("title","Title Case"),
+                       ("clean","🧹 Clean"),("lines","📋 Each Line ▪️"),("mono","`Mono`")]:
+        t="✅ " if key in active else "☐ "
+        rows.append([B(f"{t}{label}",f"st_tog_{cid}_{key}")])
+    rows.append([B("🗑 Clear All Styles",f"st_clr_{cid}")])
+    if active: rows.append([B(f"Active: {', '.join(sorted(active))}","noop")])
+    rows.append([B("── 😊 Emoji ──","noop")])
+    rows.append([B(f"Emoji: {es}  (tap to set)",f"emoji_set_{cid}")])
+    for pk,plabel in EMOJI_POS.items():
+        t="✅ " if ep==pk else ""
+        rows.append([B(f"{t}{plabel}",f"emoji_pos_{cid}_{pk}")])
+    rows.append([B("🗑 Clear Emoji",f"emoji_clr_{cid}")])
+    rows.append([B("🧪 Test Style",f"ai_t_{cid}")])
+    rows.append([B("‹ Back",f"ch_{cid}"),B("🏠 Home","main")]); return IM(rows)
+
+def KB_AI_G(uid):
+    chs=ch_all(uid); rows=[[B("✨ Text Style","noop")],[B("🌐 Change ALL Channels","ai_g_all")]]
+    for ch in chs:
+        active=parse_style_set(ch.get('free_style','none'))
+        lbl=', '.join(sorted(active)) if active else "❌ Off"
+        rows.append([B(f"{ch['ch_name'][:24]} — {lbl}",f"ai_{ch['id']}")])
+    if not chs: rows.append([B("No channels","ch_new")])
+    rows.append([B("‹ Back","settings")]); return IM(rows)
+
+def KB_AI_GLOBAL(uid):
+    rows=[[B("🌐 Change ALL Style","noop")]]
+    for k,lbl in [("bold","𝗕𝗼𝗹𝗱"),("italic","𝘐𝘵𝘢𝘭𝘊"),("bold_italic","𝗕+𝘐 Bold+Italic"),
+                   ("caps","CAPS"),("lower","lower"),("title","Title"),
+                   ("clean","🧹 Clean"),("lines","📋 Lines"),("mono","`Mono`"),("none","❌ Clear All")]:
+        rows.append([B(lbl,f"ai_g_set_{k}")])
+    rows.append([B("‹ Back","ai_g")]); return IM(rows)
+
 def KB_DESTS(cid):
     ch=ch_get(cid); dests=json.loads(ch['dests'])
     rows=[[B(f"📤 Destinations  •  {ch['ch_name'][:18]}","noop")]]
     for d in dests: rows.append([B(f"▸ {d['name'][:30]}","noop"),B("🗑",f"d_dest_{cid}_{d['id']}")])
     if not dests: rows.append([B("No destinations yet","noop")])
     rows.append([B("➕ Add Destination",f"dest_pick_{cid}")])
-    rows.append([B("‹ Back",f"ch_{cid}"), B("🏠 Home","main")])
-    return IM(rows)
+    rows.append([B("‹ Back",f"ch_{cid}"),B("🏠 Home","main")]); return IM(rows)
 
-# ── SUBSCRIPTION ───────────────────────────────────────────────
 def KB_SUB(uid):
-    plans = [p for p in plan_all() if p['enabled']]
-    rows = [
-        [B(f"💳  {u_sub_str(uid)}","noop")],
-        [B(f"Expires: {u_sub_end_str(uid)}","noop")],
-    ]
+    plans=[p for p in plan_all() if p['enabled']]
+    rows=[[B(f"💳  {u_sub_str(uid)}","noop")],[B(f"Expires: {u_sub_end_str(uid)}","noop")]]
     for p in plans:
-        rows.append([B(f"{p['label']}  •  ₹{p['price']}  •  {p['days']} Days", f"buy_{p['key']}")])
-    rows.append([B("🔄 Renew","sub_renew"),  B(f"💬 {ADMIN_USERNAME}","support")])
-    rows.append([B("‹ Back","main")])
-    return IM(rows)
+        mx=p.get('max_channels',0); ct="∞ ch" if mx==0 else f"{mx} ch"
+        rows.append([B(f"{p['label']}  •  ₹{p['price']}  •  {p['days']}d  •  {ct}",f"buy_{p['key']}")])
+    rows.append([B("🔄 Renew","sub_renew"),B(f"💬 {ADMIN_USERNAME}","support")])
+    rows.append([B("‹ Back","main")]); return IM(rows)
+
+def KB_ADM():
+    tu,au,tf,tr,tb,td,nw=adm_stats()
+    return IM([
+        [B(f"🔧 Admin  •  {tu}👥  {au}✅  {tb}🚫","noop")],
+        [B(f"📨 {tf} fwd  •  📅 {td} today  •  🆕 {nw}/7d","noop")],
+        [B("👥 Users","a_users"),         B("✅ Active","a_active")],
+        [B("✅ Give Sub","a_give"),        B("❌ Revoke","a_revoke")],
+        [B("🚫 Ban","a_ban"),              B("✅ Unban","a_unban")],
+        [B("🔍 Search","a_search")],
+        [B("📢 Broadcast All","a_bc_all"),B("📢 Active Only","a_bc_act")],
+        [B("📊 Stats","a_stats"),          B("📡 Channels","a_chs")],
+        [B("💰 Revenue","a_revenue"),      B("🔄 Restart All","a_restart")],
+        [B("💳 Plan Management","a_plans")],
+    ])
+
+def KB_PLANS():
+    plans=plan_all(); trial=get_trial_days()
+    rows=[[B("💳 Plan Management","noop")],
+          [B(f"🎁 Trial Days: {trial}  (tap to change)","a_trial")],
+          [B("─────────────────────","noop")]]
+    for p in plans:
+        st="🟢" if p['enabled'] else "🔴"; mx=p.get('max_channels',0); ct="∞" if mx==0 else str(mx)
+        rows.append([
+            B(f"{st} {p['label']}  ₹{p['price']}  {p['days']}d  [{ct} ch]",f"a_plan_edit_{p['key']}"),
+            B("🔴" if p['enabled'] else "🟢",f"a_plan_tog_{p['key']}"),
+            B("🗑",f"a_plan_del_{p['key']}"),
+        ])
+    rows.append([B("➕ Add New Plan","a_plan_add")]); rows.append([B("‹ Back","adm")]); return IM(rows)
 
 # ═══════════════════════════════════════════════════════════════
-#   QR LOGIN WITH COUNTDOWN TIMER
+#   QR LOGIN
 # ═══════════════════════════════════════════════════════════════
-QR_CL: dict = {}
+QR_CL:dict={}
 
-async def do_qr(update: Update, ctx):
-    uid = update.effective_user.id
-    msg = update.callback_query.message if update.callback_query else update.message
-
-    # ── Already logged in? Just show dashboard ──
+async def do_qr(update:Update,ctx):
+    uid=update.effective_user.id
+    msg=update.callback_query.message if update.callback_query else update.message
     if s_get(uid):
-        if uid not in ACL:
-            asyncio.create_task(eng_start(uid))
-        try:
-            await msg.reply_text(
-                f"✅ Already logged in!\n{u_sub_str(uid)}",
-                reply_markup=KB_MAIN(uid)
-            )
+        if uid not in ACL: asyncio.create_task(eng_start(uid))
+        try: await msg.reply_text(f"✅ Already logged in!\n{u_sub_str(uid)}",reply_markup=KB_MAIN(uid))
         except:
             if update.callback_query:
-                await update.callback_query.edit_message_text(
-                    f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",
-                    reply_markup=KB_MAIN(uid)
-                )
+                await update.callback_query.edit_message_text(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",reply_markup=KB_MAIN(uid))
         return
-
-    # Clean old QR client
-    old = QR_CL.pop(uid, None)
+    old=QR_CL.pop(uid,None)
     if old:
         try: await old.disconnect()
         except: pass
-
-    cl = TelegramClient(StringSession(), API_ID, API_HASH)
-    await cl.connect(); QR_CL[uid] = cl; fp = f"qr_{uid}.png"
-
-    prog = await msg.reply_text("⏳ Generating QR code...")
-
+    cl=TelegramClient(StringSession(),API_ID,API_HASH)
+    await cl.connect(); QR_CL[uid]=cl; fp=f"qr_{uid}.png"
+    prog=await msg.reply_text("⏳ Generating QR code...")
     try:
-        qr = await cl.qr_login()
-        qrcode.make(qr.url).save(fp)
+        qr=await cl.qr_login(); qrcode.make(qr.url).save(fp)
         await prog.delete()
-
-        # Send QR photo
-        qrmsg = await msg.reply_photo(
-            open(fp, "rb"),
-            caption=(
-                f"📱 {BOT_NAME} Login\n\n"
-                f"1️⃣ Open Telegram\n"
-                f"2️⃣ Settings → Devices\n"
-                f"3️⃣ Link Device → Scan\n\n"
-                f"⏳ Expires in: 30 seconds"
-            )
-        )
+        qrmsg=await msg.reply_photo(open(fp,"rb"),
+            caption=f"📱 {BOT_NAME} Login\n\n1️⃣ Open Telegram\n2️⃣ Settings → Devices\n3️⃣ Link Device → Scan\n\n⏳ Expires: 30s")
         if os.path.exists(fp): os.remove(fp)
-
-        # Timer message
-        start_time = time.time()
-        timer_msg = await msg.reply_text("⏳ QR Timer: 0:30 remaining...")
-        timer_task = asyncio.create_task(
-            _qr_countdown(timer_msg, start_time, QR_TIMEOUT)
-        )
-
-        try:
-            await asyncio.wait_for(qr.wait(), timeout=QR_TIMEOUT)
+        start_time=time.time()
+        timer_msg=await msg.reply_text("⏳ QR: 0:30 remaining...")
+        timer_task=asyncio.create_task(_qr_countdown(timer_msg,start_time,QR_TIMEOUT))
+        try: await asyncio.wait_for(qr.wait(),timeout=QR_TIMEOUT)
         except asyncio.TimeoutError:
             timer_task.cancel()
             try: await timer_msg.delete()
             except: pass
             try: await qrmsg.delete()
             except: pass
-            await msg.reply_text(
-                "⏰ QR Expired!\n\nTap below to try again.",
-                reply_markup=KB([B("🔄 Try Again","qr_login")])
-            )
+            await msg.reply_text("⏰ QR Expired!",reply_markup=KB([B("🔄 Try Again","qr_login")]))
             try: await cl.disconnect()
             except: pass
             return
-
         timer_task.cancel()
         try: await timer_msg.delete()
         except: pass
-
-        # Login success — save session FIRST
-        sess = cl.session.save()
-        s_save(uid, sess)
-        SESSION_CACHE[uid] = sess
-        KNOWN_USERS.add(uid)  # ✅ Mark as known — never show login again
-        is_new = u_upsert(uid, update.effective_user.username or "", update.effective_user.first_name or "")
-        me = await cl.get_me()
-        nm = me.first_name or ""
-        un = f"@{me.username}" if me.username else str(me.id)
-
-        # Keep client alive in ACL
-        ACL[uid] = cl
-
+        sess=cl.session.save(); s_save(uid,sess); SESSION_CACHE[uid]=sess; KNOWN_USERS.add(uid)
+        is_new=u_upsert(uid,update.effective_user.username or "",update.effective_user.first_name or "")
+        me=await cl.get_me(); nm=me.first_name or ""; un=f"@{me.username}" if me.username else str(me.id)
+        ACL[uid]=cl
         try: await qrmsg.delete()
         except: pass
-
-        # Show success immediately — don't wait for engine/fetch
         await msg.reply_text(
-            f"✅ Login Successful!\n\n"
-            f"👤 {nm}  ({un})\n"
+            f"✅ Login Successful!\n\n👤 {nm}  ({un})\n"
             f"{'🎁 Free Trial: '+str(get_trial_days())+' days!' if is_new else '💳 '+u_sub_str(uid)}",
-            reply_markup=KB_MAIN(uid)
-        )
-
-        # Start engine and fetch chats in background
-        asyncio.create_task(eng_start(uid))
-        asyncio.create_task(fetch_chats(uid))
-
+            reply_markup=KB_MAIN(uid))
+        asyncio.create_task(eng_start(uid)); asyncio.create_task(fetch_chats(uid))
     except Exception as e:
-        LOG.error(f"QR:{e}"); await msg.reply_text(f"❌ Error: {e}\n/start karo")
+        LOG.error(f"QR:{e}"); await msg.reply_text(f"❌ Error: {e}")
         try: await cl.disconnect()
         except: pass
     finally:
         if os.path.exists(fp): os.remove(fp)
-        QR_CL.pop(uid, None)
+        QR_CL.pop(uid,None)
 
-async def _qr_countdown(timer_msg, start_time, total):
-    """Live countdown for 30 second QR."""
+async def _qr_countdown(timer_msg,start_time,total):
     try:
-        intervals = [25, 20, 15, 10, 5]
-        for sec in intervals:
-            sleep_time = total - sec - (time.time() - start_time)
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
-            try:
-                await timer_msg.edit_text(f"⏳ QR expires in: {sec} seconds...")
+        for sec in [25,20,15,10,5]:
+            st=total-sec-(time.time()-start_time)
+            if st>0: await asyncio.sleep(st)
+            try: await timer_msg.edit_text(f"⏳ QR expires in: {sec} seconds...")
             except: pass
-    except asyncio.CancelledError:
-        pass
-
-async def _fetch_and_delete(uid, msg):
-    await fetch_chats(uid)
-    try: await msg.delete()
-    except: pass
+    except asyncio.CancelledError: pass
 
 # ═══════════════════════════════════════════════════════════════
-#   CHANNEL PICKER (numbered)
+#   CHANNEL PICKER
 # ═══════════════════════════════════════════════════════════════
-async def show_picker(uid, mode, page, edit_target, cid_dest=None):
-    chats = CHAT_CACHE.get(uid, [])
-    if not chats: chats = await fetch_chats(uid)
+async def show_picker(uid,mode,page,edit_target,cid_dest=None):
+    chats=CHAT_CACHE.get(uid,[])
+    if not chats: chats=await fetch_chats(uid)
     if not chats:
-        try: await edit_target.edit_text("❌ No channels found! Join some channels first.")
+        try: await edit_target.edit_text("❌ No channels found!")
         except: await edit_target.reply_text("❌ No channels found!")
         return
-
-    total = len(chats)
-    list_txt, _ = chat_list_text(chats, page)
-
-    if mode == 'src':
-        hdr = (f"📡  Select SOURCE Channel\n"
-               f"━━━━━━━━━━━━━━━━━━━━\n"
-               f"Kaunsa channel se forward karna hai?\n\n")
-        prefix = "ps"
-    else:
-        hdr = (f"📤  Select DESTINATION Channel\n"
-               f"━━━━━━━━━━━━━━━━━━━━\n"
-               f"Kahan forward karna hai?\n\n")
-        prefix = f"pd_{cid_dest}"
-
-    txt = hdr + list_txt + f"\n━━━━━━━━━━━━━━━━━━━━\n📋 Total: {total} channels"
-    kb  = num_kb(chats, page, prefix, total)
-
-    try: await edit_target.edit_text(txt, reply_markup=kb)
-    except: await edit_target.reply_text(txt, reply_markup=kb)
+    total=len(chats); list_txt,_=chat_list_text(chats,page)
+    if mode=='src': hdr="📡  Select SOURCE Channel\n━━━━━━━━━━━━━━━━━━━━\n\n"; prefix="ps"
+    else:           hdr="📤  Select DESTINATION Channel\n━━━━━━━━━━━━━━━━━━━━\n\n"; prefix=f"pd_{cid_dest}"
+    txt=hdr+list_txt+f"\n━━━━━━━━━━━━━━━━━━━━\n📋 Total: {total} channels"
+    kb=num_kb(chats,page,prefix,total)
+    try: await edit_target.edit_text(txt,reply_markup=kb)
+    except: await edit_target.reply_text(txt,reply_markup=kb)
 
 # ═══════════════════════════════════════════════════════════════
 #   STATE
 # ═══════════════════════════════════════════════════════════════
-TEMP: dict = {}
-(ST_LO,ST_LN,ST_WO,ST_WN,ST_WL,ST_BL,
- ST_HDR,ST_FTR,ST_DLY,ST_AIP,ST_AIT,
- ST_REN,ST_BC,ST_GID,ST_GDY,ST_SRCH,
- ST_PLAN_PRICE,ST_PLAN_DAYS,ST_PLAN_NEW,ST_TRIAL,ST_EMOJI) = range(21)
+TEMP:dict={}
+(ST_LO,ST_LN,ST_WO,ST_WN,ST_WL,ST_BL,ST_PB,
+ ST_HDR,ST_FTR,ST_DLY,ST_AIT,ST_REN,
+ ST_BC,ST_GID,ST_GDY,ST_SRCH,
+ ST_PLAN_PRICE,ST_PLAN_DAYS,ST_PLAN_MAXCH,ST_PLAN_NEW,ST_TRIAL,
+ ST_EMOJI,ST_PRO,ST_PRN) = range(24)
 
 # ═══════════════════════════════════════════════════════════════
 #   COMMANDS
 # ═══════════════════════════════════════════════════════════════
-async def cmd_start(u: Update, ctx):
-    uid = u.effective_user.id
-    if uid in ADMIN_IDS:
-        await u.message.reply_text("🔧 Admin Panel", reply_markup=KB_ADM()); return
-
-    # Check cache first, then DB as fallback
-    sess = s_get(uid)  # checks cache + DB both
-    in_acl = uid in ACL
-
-    if sess or in_acl:
-        # Populate cache if missing
-        if sess and uid not in SESSION_CACHE:
-            SESSION_CACHE[uid] = sess
-        # Start engine if not running
-        if sess and not in_acl:
-            asyncio.create_task(eng_start(uid))
-        u_upsert(uid, u.effective_user.username or "", u.effective_user.first_name or "")
-        await u.message.reply_text(
-            f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",
-            reply_markup=KB_MAIN(uid))
-        return
-
+async def cmd_start(u:Update,ctx):
+    uid=u.effective_user.id
+    if uid in ADMIN_IDS: await u.message.reply_text("🔧 Admin Panel",reply_markup=KB_ADM()); return
+    sess=s_get(uid)
+    if sess or uid in ACL:
+        if sess and uid not in SESSION_CACHE: SESSION_CACHE[uid]=sess
+        if sess and uid not in ACL: asyncio.create_task(eng_start(uid))
+        u_upsert(uid,u.effective_user.username or "",u.effective_user.first_name or "")
+        await u.message.reply_text(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",reply_markup=KB_MAIN(uid)); return
     await u.message.reply_text(
-        f"⚡ {BOT_NAME} — Pro Forwarder\n\n"
-        f"📡 Auto channel detect\n"
-        f"📋 Copy mode • 🔗 Replace\n"
-        f"✂️ Filters • 📐 Format\n"
-        f"🎁 {get_trial_days()} days free trial\n\n"
-        f"Admin: {ADMIN_USERNAME}\n\n"
-        f"👇 Tap to login — No OTP!",
-        reply_markup=KB([B("📱 Login with QR Code","qr_login")])
-    )
+        f"⚡ {BOT_NAME} — Pro Forwarder\n\n📡 Auto channel detect\n"
+        f"📹 Media control • ✂️ Filters\n📝 Para block/replace\n"
+        f"🎁 {get_trial_days()} days free trial\n\nAdmin: {ADMIN_USERNAME}\n\n👇 Login — No OTP!",
+        reply_markup=KB([B("📱 Login with QR Code","qr_login")]))
 
-async def cmd_menu(u: Update, ctx):
-    uid = u.effective_user.id
-    if uid in ADMIN_IDS:
-        await u.message.reply_text("🔧 Admin Panel", reply_markup=KB_ADM()); return
+async def cmd_menu(u:Update,ctx):
+    uid=u.effective_user.id
+    if uid in ADMIN_IDS: await u.message.reply_text("🔧 Admin Panel",reply_markup=KB_ADM()); return
     if not s_get(uid): await u.message.reply_text("Pehle /start karo!"); return
-    await u.message.reply_text(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}", reply_markup=KB_MAIN(uid))
+    await u.message.reply_text(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",reply_markup=KB_MAIN(uid))
 
-async def cmd_admin(u: Update, ctx):
+async def cmd_admin(u:Update,ctx):
     if u.effective_user.id not in ADMIN_IDS: return
-    await u.message.reply_text("🔧 Admin Panel", reply_markup=KB_ADM())
+    await u.message.reply_text("🔧 Admin Panel",reply_markup=KB_ADM())
 
-async def cmd_cancel(u: Update, ctx):
-    uid = u.effective_user.id; ctx.user_data.clear(); TEMP.pop(uid,None)
+async def cmd_cancel(u:Update,ctx):
+    uid=u.effective_user.id; ctx.user_data.clear(); TEMP.pop(uid,None)
     await u.message.reply_text("❌ Cancelled.",
         reply_markup=KB_ADM() if uid in ADMIN_IDS else (KB_MAIN(uid) if s_get(uid) else None))
 
 # ═══════════════════════════════════════════════════════════════
 #   CALLBACK
 # ═══════════════════════════════════════════════════════════════
-async def cbk(update: Update, ctx):
-    q = update.callback_query; await q.answer()
-    d = q.data; uid = update.effective_user.id
+async def cbk(update:Update,ctx):
+    q=update.callback_query; await q.answer()
+    d=q.data; uid=update.effective_user.id
 
-    async def ED(txt, kb=None):
-        try: await q.edit_message_text(txt, reply_markup=kb)
+    async def ED(txt,kb=None):
+        try: await q.edit_message_text(txt,reply_markup=kb)
         except:
-            try: await q.message.reply_text(txt, reply_markup=kb)
+            try: await q.message.reply_text(txt,reply_markup=kb)
             except: pass
-
-    async def ANS(m, alert=False):
-        try: await q.answer(m, show_alert=alert)
+    async def ANS(m,alert=False):
+        try: await q.answer(m,show_alert=alert)
         except: pass
 
-    if d == "noop": return
+    if d=="noop": return
+    if d=="qr_login": await do_qr(update,ctx); return
 
-    # ── QR ──
-    if d == "qr_login": await do_qr(update, ctx); return
-
-    # ── ADMIN (no session needed) ──
-    is_admin = uid in ADMIN_IDS
+    is_admin=uid in ADMIN_IDS
     if is_admin and (d in ("main","adm") or d.startswith("a_")):
-        await _admin_cbk(d, uid, q, ctx, ED, ANS); return
+        await _admin_cbk(d,uid,q,ctx,ED,ANS); return
 
-    # ── SESSION CHECK ──
     if not is_admin:
-        # If user has EVER logged in this session — never show login screen
-        # Just restart engine silently if needed
-        is_known = uid in KNOWN_USERS
-        has_sess = (uid in ACL) or (uid in SESSION_CACHE) or is_known
-
+        has_sess=(uid in ACL) or (uid in SESSION_CACHE) or (uid in KNOWN_USERS)
         if not has_sess:
-            # Complete stranger — check DB one more time
             try:
-                c = DB()
-                r = c.execute("SELECT sess FROM sessions WHERE uid=?", (uid,)).fetchone()
-                c.close()
-                if r and r['sess']:
-                    SESSION_CACHE[uid] = r['sess']
-                    KNOWN_USERS.add(uid)
-                    has_sess = True
+                c=DB(); r=c.execute("SELECT sess FROM sessions WHERE uid=?",(uid,)).fetchone(); c.close()
+                if r and r['sess']: SESSION_CACHE[uid]=r['sess']; KNOWN_USERS.add(uid); has_sess=True
             except: pass
-
         if not has_sess:
-            # Truly unknown user — show login
-            try:
-                await q.edit_message_text(
-                    f"⚡ {BOT_NAME}\n\nLogin karo:",
-                    reply_markup=KB([B("📱 Login with QR Code","qr_login")])
-                )
+            try: await q.edit_message_text(f"⚡ {BOT_NAME}\n\nLogin karo:",reply_markup=KB([B("📱 Login with QR Code","qr_login")]))
             except:
-                try:
-                    await q.message.reply_text(
-                        f"⚡ {BOT_NAME}\n\nLogin karo:",
-                        reply_markup=KB([B("📱 Login with QR Code","qr_login")])
-                    )
+                try: await q.message.reply_text(f"⚡ {BOT_NAME}\n\nLogin karo:",reply_markup=KB([B("📱 Login with QR Code","qr_login")]))
                 except: pass
             return
-
-        # Engine not running but session exists — restart silently
-        if uid not in ACL:
-            asyncio.create_task(eng_start(uid))
+        if uid not in ACL: asyncio.create_task(eng_start(uid))
 
     # ── MAIN ──
-    if d == "main":
-        if uid in ADMIN_IDS: await ED("🔧 Admin Panel", KB_ADM()); return
-        await ED(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}", KB_MAIN(uid))
-
-    elif d == "bot_tog":
+    if d=="main":
+        if uid in ADMIN_IDS: await ED("🔧 Admin Panel",KB_ADM()); return
+        await ED(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",KB_MAIN(uid))
+    elif d=="settings": await ED("⚙️ Settings",KB_SETTINGS(uid))
+    elif d=="bot_tog":
         cur=u_bot_on(uid); u_toggle_bot(uid,not cur)
-        await ANS(f"Bot {'🟢 ON' if not cur else '🔴 OFF'}",True)
-        await ED(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}", KB_MAIN(uid))
-
-    elif d == "eng_r":
+        await ANS(f"Bot {'🟢 ON' if not cur else '🔴 OFF'}",True); await ED("⚙️ Settings",KB_SETTINGS(uid))
+    elif d=="eng_r":
         await eng_stop(uid); ok=await eng_start(uid)
-        await ANS("✅ Engine Restarted!" if ok else "❌ Error!",True)
-        await ED(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}", KB_MAIN(uid))
-
-    elif d == "logout":
-        await eng_stop(uid); s_del(uid); CHAT_CACHE.pop(uid,None)
-        await ED("🚪 Logged out!\n/start se login karo.")
-
-    elif d == "support":
-        await ED(
-            f"🆘  Support & Help\n\n"
-            f"Admin: {ADMIN_USERNAME}\n\n"
-            f"For:\n"
-            f"• Subscription purchase\n"
-            f"• Technical issues\n"
-            f"• Plan renewal\n"
-            f"• Custom features\n\n"
-            f"Your ID: `{uid}`",
-            KB([B(f"💬  Contact  {ADMIN_USERNAME}","noop"), B("‹ Back","main")])
-        )
-
-    elif d == "help":
-        await ED(
-            f"❓  Help & Guide\n\n"
-            f"Kisi bhi section ka guide dekho 👇",
-            IM([
-                [B("🚀 Quick Setup Guide","help_setup")],
-                [B("⚙️ Control Panel Guide","help_ctrl")],
-                [B("🔗 Link & Word Replace","help_repl")],
-                [B("✂️ Filters Guide","help_flt")],
-                [B("📐 Post Format Guide","help_fmt")],
-                [B("🤖 AI Rewriter Guide","help_ai")],
-                [B("🟢🔴 ON/OFF Buttons","help_onoff")],
-                [B("💳 Subscription Guide","help_sub")],
-                [B("‹ Back","main")],
-            ])
-        )
-
-    elif d == "help_onoff":
-        await ED(
-            f"🟢🔴 ON/OFF Buttons — Kya matlab hai?\n\n"
-            f"🟢 GREEN = Feature ON hai (chal raha hai)\n"
-            f"🔴 RED   = Feature OFF hai (band hai)\n\n"
-            f"Tap karo toh toggle hota hai:\n"
-            f"🟢 tap → 🔴 (band ho jaayega)\n"
-            f"🔴 tap → 🟢 (chalu ho jaayega)\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Example:\n"
-            f"🟢 Copy Mode = Copy mode ON hai\n"
-            f"🔴 Silent = Silent mode OFF hai\n\n"
-            f"Har button ek alag feature hai,\n"
-            f"ek dusre pe asar nahi karta.",
-            KB([B("‹ Back","help"), B("🏠 Home","main")])
-        )
-
-    elif d == "help_setup":
-        await ED(
-            f"🚀 Quick Setup — 3 Steps\n\n"
-            f"Step 1️⃣ — Channel Add karo\n"
-            f"  📡 My Channels → ➕ Add Channel\n"
-            f"  Apni channel list dikhegi\n"
-            f"  Number dabao jis se forward karna hai\n\n"
-            f"Step 2️⃣ — Destination Add karo\n"
-            f"  Phir list aayegi\n"
-            f"  Number dabao jahan forward karna hai\n\n"
-            f"Step 3️⃣ — Done! 🎉\n"
-            f"  Forwarding shuru ho gayi!\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💡 Tips:\n"
-            f"• Multiple destinations add kar sakte ho\n"
-            f"• Multiple source channels bhi\n"
-            f"• Har channel ki alag settings\n"
-            f"• Engine ON hona chahiye (Main menu)\n\n"
-            f"⚠️ Bot Engine OFF hone pe forward nahi hoga!",
-            KB([B("‹ Back","help"), B("🏠 Home","main")])
-        )
-
-    elif d == "help_ctrl":
-        await ED(
-            f"⚙️ Control Panel — Har Button Ka Matlab\n\n"
-            f"🟢 Copy Mode\n"
-            f"  ON  = Source channel ka naam nahi dikhega\n"
-            f"  OFF = 'Forwarded from X' dikhega\n\n"
-            f"🔴 Silent\n"
-            f"  ON  = Destination mein notification nahi\n"
-            f"  OFF = Normal notification aayega\n\n"
-            f"🔴 Pin\n"
-            f"  ON  = Forward hone ke baad auto-pin\n"
-            f"  OFF = Pin nahi hoga\n\n"
-            f"🔴 No Caption\n"
-            f"  ON  = Photo/video ka caption hatega\n"
-            f"  OFF = Caption as-is rehega\n\n"
-            f"🔴 Media Only\n"
-            f"  ON  = Sirf photos/videos forward\n"
-            f"  OFF = Sab kuch forward hoga\n\n"
-            f"🔴 Text Only\n"
-            f"  ON  = Sirf text forward\n"
-            f"  OFF = Sab kuch forward hoga\n\n"
-            f"🟢 Dup Check\n"
-            f"  ON  = Same message dobara forward nahi\n"
-            f"  OFF = Duplicate bhi forward hoga\n\n"
-            f"⏱ Delay\n"
-            f"  Kitne second baad forward ho\n"
-            f"  0 = instant, 60 = 1 min baad\n\n"
-            f"📝 Header — Message ke UPAR text\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"  🔥 TRADER PIHU TIPS  ← Header\n"
-            f"  ─────────────────────\n"
-            f"  [Original message]\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"  Use: Branding, category tag\n"
-            f"  Example: '📊 STOCK ALERT'\n"
-            f"  Clear karne ke liye: '-' bhejo\n\n"
-            f"📝 Footer — Message ke NEECHE text\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"  [Original message]\n"
-            f"  ─────────────────────\n"
-            f"  Join 👉 @mychannel    ← Footer\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"  Use: Channel promote, watermark\n"
-            f"  Example: '— Shaan Malik Dubai™'\n"
-            f"  Clear karne ke liye: '-' bhejo",
-            KB([B("‹ Back","help"), B("🏠 Home","main")])
-        )
-
-    elif d == "help_repl":
-        await ED(
-            f"🔄 Link & Word Replace — Kya Karta Hai?\n\n"
-            f"🔗 LINK REPLACE:\n"
-            f"  Source mein koi link hai toh use\n"
-            f"  apne link se replace kar do\n\n"
-            f"  Example:\n"
-            f"  Purana: https://t.me/enemy_channel\n"
-            f"  Naya:   https://t.me/my_channel\n"
-            f"  Ab har post mein link badal jaayega!\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📝 WORD REPLACE:\n"
-            f"  Koi bhi word ya sentence replace karo\n\n"
-            f"  Example:\n"
-            f"  Purana: Shaan Malik\n"
-            f"  Naya:   Admin\n"
-            f"  Source ka naam badal jaayega!\n\n"
-            f"  (Khali rakhne ke liye Naya = '-')\n\n"
-            f"💡 Tip: Multiple replacements add kar sakte ho",
-            KB([B("‹ Back","help"), B("🏠 Home","main")])
-        )
-
-    elif d == "help_flt":
-        await ED(
-            f"✂️ Filters — Kya Forward Ho, Kya Nahi\n\n"
-            f"🔗 LINK BLOCKING:\n"
-            f"⚪ Block ALL Links (Master switch)\n"
-            f"  ON = Sabhi links + @username block\n"
-            f"  OFF = Koi block nahi\n\n"
-            f"Individual controls:\n"
-            f"• http/https/www = Website links block\n"
-            f"• t.me Links = Telegram links block\n"
-            f"• @Username = @mentions block\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ WHITELIST (Forward IF contains):\n"
-            f"  Sirf wo messages forward honge\n"
-            f"  jisme ye word/text ho\n\n"
-            f"  Example: 'BUY' add karo\n"
-            f"  → Sirf 'BUY' wale messages forward\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🚫 BLACKLIST (Skip IF contains):\n"
-            f"  Jo messages mein ye word ho\n"
-            f"  wo forward NAHI honge\n\n"
-            f"  Example: 'ADVERTISEMENT' add karo\n"
-            f"  → Ads skip ho jaayenge!",
-            KB([B("‹ Back","help"), B("🏠 Home","main")])
-        )
-
-    elif d == "help_fmt":
-        await ED(
-            f"📐 Post Format — Message Ki Styling\n\n"
-            f"🔴 Bold Title\n"
-            f"  ON  = Message ki pehli line BOLD ho jaati\n"
-            f"  OFF = Normal text\n\n"
-            f"🔴 Clean Text\n"
-            f"  ON  = Extra spaces aur blank lines hata deta\n"
-            f"  OFF = Original spacing\n\n"
-            f"🔴 No Links\n"
-            f"  ON  = Sabhi links text se hata deta\n"
-            f"  OFF = Links as-is\n\n"
-            f"🔴 No Caption (media ke liye)\n"
-            f"  ON  = Photo/video ka caption delete\n"
-            f"  OFF = Caption rehega\n\n"
-            f"📝 Header\n"
-            f"  Jo text message ke UPAR add hoga\n"
-            f"  Example: '🔥 Daily Tips'\n\n"
-            f"📝 Footer\n"
-            f"  Jo text message ke NEECHE add hoga\n"
-            f"  Example: 'Join @mychannel'\n\n"
-            f"🤖 AI Style\n"
-            f"  AI se message rewrite karo",
-            KB([B("‹ Back","help"), B("🏠 Home","main")])
-        )
-
-    elif d == "help_ai":
-        await ED(
-            f"🤖 AI Rewriter — Post Auto-Rewrite\n\n"
-            f"AI automatically har message ko\n"
-            f"apne style mein rewrite karta hai!\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Available Styles:\n\n"
-            f"📰 News Style\n"
-            f"  Professional news jaisa format\n\n"
-            f"💬 Casual\n"
-            f"  Friendly aur casual tone\n\n"
-            f"🎩 Formal\n"
-            f"  Professional formal tone\n\n"
-            f"✂️ Short\n"
-            f"  2-3 line mein summary\n\n"
-            f"• Bullets\n"
-            f"  Bullet points mein convert\n\n"
-            f"😊 Emoji\n"
-            f"  Emojis add karke engaging banao\n\n"
-            f"🔥 Clickbait\n"
-            f"  Catchy headline style\n\n"
-            f"🧹 Clean\n"
-            f"  Promotions aur links remove\n\n"
-            f"✏️ Custom\n"
-            f"  Apna khud ka AI prompt likho!\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🧪 Test Button\n"
-            f"  Pehle test karo, phir ON karo\n\n"
-            f"⚠️ AI ke liye Anthropic API key chahiye\n"
-            f"  CONFIG mein CLAUDE_KEY daalo",
-            KB([B("‹ Back","help"), B("🏠 Home","main")])
-        )
-
-    elif d == "help_sub":
-        await ED(
-            f"💳 Subscription Guide\n\n"
-            f"🎁 Free Trial: {get_trial_days()} Days\n"
-            f"  New account pe automatic milti hai\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Plans:\n"
-            +"\n".join([f"  {p['label']} = ₹{p['price']} / {p['days']} days" for p in plan_all() if p['enabled']])+
-            f"\n\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"Kaise kharidein:\n"
-            f"1. 💳 Subscription → Plan choose karo\n"
-            f"2. UPI payment karo\n"
-            f"3. Screenshot {ADMIN_USERNAME} ko bhejo\n"
-            f"4. Apna User ID bhejo: (bot mein milega)\n"
-            f"5. Admin 5-10 min mein activate karega\n\n"
-            f"Status check: 💳 Subscription → Status line",
-            KB([B("💳 View Plans","sub"), B("‹ Back","help"), B("🏠 Home","main")])
-        )
+        await ANS("✅ Engine Restarted!" if ok else "❌ Error!",True); await ED("⚙️ Settings",KB_SETTINGS(uid))
+    elif d=="logout":
+        await eng_stop(uid); s_del(uid); CHAT_CACHE.pop(uid,None); await ED("🚪 Logged out!\n/start se login karo.")
+    elif d=="support":
+        await ED(f"🆘 Support\n\nAdmin: {ADMIN_USERNAME}\n\nYour ID: `{uid}`",KB([B(f"💬 Contact {ADMIN_USERNAME}","noop"),B("‹ Back","main")]))
 
     # ── CHANNELS ──
-    elif d == "chs": await ED("📡  My Channels", KB_CHS(uid))
-
-    elif d == "ch_new":
+    elif d=="chs": await ED("📡  My Channels",KB_CHS(uid))
+    elif d=="ch_new":
         if not u_ok(uid): await ANS("❌ Subscription needed!",True); return
+        can,msg2=u_can_add_channel(uid)
+        if not can: await ED(msg2,KB([B("💳 Upgrade Plan","sub"),B("‹ Back","chs")])); return
         chats=CHAT_CACHE.get(uid,[])
         if not chats:
-            p=await q.message.reply_text("📡 Fetching channels...")
-            chats=await fetch_chats(uid)
+            p=await q.message.reply_text("📡 Fetching channels..."); chats=await fetch_chats(uid)
             try: await p.delete()
             except: pass
         await show_picker(uid,'src',0,q.message)
@@ -1639,290 +1236,225 @@ async def cbk(update: Update, ctx):
         cid=int(d[3:]); ch=ch_get(cid)
         if not ch: return
         dests=json.loads(ch['dests'])
-        await ED(
-            f"📡  {ch['ch_name']}\n"
-            f"▸ {ch['src_name']}\n"
-            f"📤 {len(dests)} dest  •  {'🟢 ON' if ch['enabled'] else '🔴 OFF'}\n"
-            f"🤖 AI: {AI_STYLES.get(ch.get('ai_style','none'),('—',))[0] if ch['ai_on'] else 'Off'}",
-            KB_CH(cid)
-        )
+        await ED(f"📡  {ch['ch_name']}\n▸ {ch['src_name']}\n📤 {len(dests)} dest  •  {'🟢 ON' if ch['enabled'] else '🔴 OFF'}",KB_CH(cid))
 
     elif d.startswith("ch_del_"):
-        cid=int(d[7:]); ch_del(cid,uid)
-        await eng_stop(uid); asyncio.create_task(eng_start(uid))
+        cid=int(d[7:]); ch_del(cid,uid); await eng_stop(uid); asyncio.create_task(eng_start(uid))
         await ANS("🗑 Deleted!",True); await ED("📡 My Channels",KB_CHS(uid))
-
     elif d.startswith("ch_tog_"):
-        cid=int(d[7:]); new=ch_toggle(cid)
-        await eng_stop(uid); asyncio.create_task(eng_start(uid))
+        cid=int(d[7:]); new=ch_toggle(cid); await eng_stop(uid); asyncio.create_task(eng_start(uid))
         await ANS(f"{'🟢 Enabled' if new else '🔴 Disabled'}",True)
-        r=ch_get(cid); await ED(f"📡 {r['ch_name']}",KB_CH(cid))
-
+        await ED(f"📡 {ch_get(cid)['ch_name']}",KB_CH(cid))
     elif d.startswith("ch_ren_"):
         cid=int(d[7:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_REN
         await q.message.reply_text("✏️ New name bhejo:\n\n/cancel")
-
     elif d.startswith("ch_stat_"):
         cid=int(d[8:]); ch=ch_get(cid)
         c=DB()
         tot=c.execute("SELECT COUNT(*) as n FROM fwd_log WHERE ch_id=?",(cid,)).fetchone()['n']
         tod=c.execute("SELECT COUNT(*) as n FROM fwd_log WHERE ch_id=? AND ts>?",(cid,time.time()-86400)).fetchone()['n']
         c.close()
-        fils=f_get(cid); lrp=rp_get(cid,'link'); wrp=rp_get(cid,'word')
-        dests=json.loads(ch['dests'])
+        blk=[MEDIA_TYPES[k][0] for k,(_,col) in [(k,MEDIA_TYPES[k]) for k in MEDIA_TYPES] if ch.get(col)]
+        active=parse_style_set(ch.get('free_style','none'))
+        hdr_t=f"\n📝 Header: {_short(ch.get('header',''),30)}" if ch.get('header') else ""
+        ftr_t=f"\n📝 Footer: {_short(ch.get('footer',''),30)}" if ch.get('footer') else ""
+        blk_t=f"\n📹 Blocked: {', '.join(blk)}" if blk else "\n📹 Blocked: None"
         await ED(
             f"📊  Stats: {ch['ch_name']}\n\n"
-            f"📨 Forwarded Total: {tot}\n"
-            f"📅 Today          : {tod}\n"
-            f"📤 Destinations   : {len(dests)}\n"
-            f"✂️  Filters        : {len(fils)}\n"
-            f"🔗 Link Replaces  : {len(lrp)}\n"
-            f"📝 Word Replaces  : {len(wrp)}\n"
-            f"🤖 AI Style       : {AI_STYLES.get(ch.get('ai_style','none'),('—',))[0]}",
-            KB([B("‹ Back",f"ch_{cid}"), B("🏠 Home","main")])
-        )
+            f"📨 Total Fwd : {tot}\n📅 Today     : {tod}\n"
+            f"📤 Dest      : {len(json.loads(ch['dests']))}\n"
+            f"✨ Style     : {', '.join(sorted(active)) or 'None'}"
+            f"{hdr_t}{ftr_t}{blk_t}",
+            KB([B("‹ Back",f"ch_{cid}"),B("🏠 Home","main")]))
+
+    # ═══════════════════════════════════════════════════════════
+    #   MEDIA CONTROL CALLBACKS
+    # ═══════════════════════════════════════════════════════════
+    elif d.startswith("media_") and d[6:].isdigit():
+        # media_{cid} — open media panel
+        cid=int(d[6:]); await ED("📹 Media Control",KB_MEDIA(cid))
+
+    elif d.startswith("media_blkall_"):
+        # Block ALL media types
+        cid=int(d[13:])
+        kw={col:1 for _,(lbl,col) in MEDIA_TYPES.items()}; ch_upd(cid,**kw)
+        await ANS("🔴 ALL Media Blocked!",True); await ED("📹 Media Control",KB_MEDIA(cid))
+
+    elif d.startswith("media_alwall_"):
+        # Allow ALL media types
+        cid=int(d[13:])
+        kw={col:0 for _,(lbl,col) in MEDIA_TYPES.items()}; ch_upd(cid,**kw)
+        await ANS("✅ ALL Media Allowed!",True); await ED("📹 Media Control",KB_MEDIA(cid))
+
+    elif d.startswith("mt_"):
+        # mt_{cid}_{col}  — toggle individual media type
+        # Format: mt_123_blk_voice  or  mt_123_blk_vidmsg
+        rest=d[3:]                          # "123_blk_voice"
+        underscore_idx=rest.index('_')     # first underscore
+        cid=int(rest[:underscore_idx])     # 123
+        col=rest[underscore_idx+1:]        # "blk_voice"
+        ch=ch_get(cid)
+        if not ch: await ANS("❌ Not found!",True); return
+        # Validate col is a known media col
+        valid_cols={v[1] for v in MEDIA_TYPES.values()}
+        if col not in valid_cols: await ANS("❌ Invalid!",True); return
+        current_val=bool(ch.get(col,0))
+        new_val=0 if current_val else 1
+        ch_upd(cid,**{col:new_val})
+        # Find label
+        mname=next((v[0] for v in MEDIA_TYPES.values() if v[1]==col),"Media")
+        status="🔴 BLOCKED" if new_val else "✅ ALLOWED"
+        await ANS(f"{status}: {mname}",True)
+        await ED("📹 Media Control",KB_MEDIA(cid))
 
     # ── PICKER ──
     elif d.startswith("pg_"):
         parts=d.split("_"); page=int(parts[-1])
-        if "ps" in d:
-            await show_picker(uid,'src',page,q.message)
-        elif "pd_" in d:
-            cid=int(parts[2]); await show_picker(uid,'dest',page,q.message,cid)
-
+        if "ps" in d: await show_picker(uid,'src',page,q.message)
+        elif "pd_" in d: cid=int(parts[2]); await show_picker(uid,'dest',page,q.message,cid)
     elif d.startswith("refr_"):
-        p=await q.message.reply_text("🔄 Refreshing...")
-        await fetch_chats(uid)
+        p=await q.message.reply_text("🔄 Refreshing..."); await fetch_chats(uid)
         try: await p.delete()
         except: pass
         if "ps" in d: await show_picker(uid,'src',0,q.message)
-        else:
-            cid=TEMP.get(uid,{}).get('cid')
-            await show_picker(uid,'dest',0,q.message,cid)
-
-    elif d.startswith("ps_"):  # source picked
+        else: cid=TEMP.get(uid,{}).get('cid'); await show_picker(uid,'dest',0,q.message,cid)
+    elif d.startswith("ps_"):
         idx=int(d[3:]); chats=CHAT_CACHE.get(uid,[])
         if idx>=len(chats): await ANS("❌ Invalid!"); return
-        chat=chats[idx]
-        cid=ch_add(uid,chat['id'],chat['name'],chat['name'][:25])
-        asyncio.create_task(eng_start(uid))
-        TEMP[uid]={'cid':cid}
+        chat=chats[idx]; cid=ch_add(uid,chat['id'],chat['name'],chat['name'][:25])
+        asyncio.create_task(eng_start(uid)); TEMP[uid]={'cid':cid}
         await show_picker(uid,'dest',0,q.message,cid)
-
-    elif d.startswith("pd_"):  # dest picked
+    elif d.startswith("pd_"):
         parts=d.split("_"); cid=int(parts[1]); idx=int(parts[2])
         chats=CHAT_CACHE.get(uid,[])
         if idx>=len(chats): await ANS("❌ Invalid!"); return
-        chat=chats[idx]
-        ch_add_dest(cid,chat['id'],chat['name'])
-        asyncio.create_task(eng_start(uid))
+        chat=chats[idx]; ch_add_dest(cid,chat['id'],chat['name']); asyncio.create_task(eng_start(uid))
         ch=ch_get(cid)
         await ED(
-            f"╔══ ✅ Setup Complete! ══╗\n\n"
-            f"📡 Source : {ch['src_name']}\n"
-            f"📤 Dest   : {chat['name']}\n\n"
-            f"🎉 Forwarding is now active!\n\n"
-            f"Customise your channel:\n╚{'═'*24}╝",
-            IM([
-                [B("➕ Add More Destinations",f"dest_pick_{cid}")],
-                [B("⚙️ Control Panel",f"ctrl_{cid}"), B("🤖 AI Setup",f"ai_{cid}")],
-                [B("🔗 Link Replace",f"lrp_{cid}"),  B("📝 Word Replace",f"wrp_{cid}")],
-                [B("📡 My Channels","chs"),            B("🏠 Home","main")],
-            ])
-        )
-
+            f"╔══ ✅ Setup Complete! ══╗\n\n📡 Source : {ch['src_name']}\n📤 Dest   : {chat['name']}\n\n🎉 Forwarding active!\n╚{'═'*24}╝",
+            IM([[B("➕ More Dest",f"dest_pick_{cid}")],
+                [B("⚙️ Control",f"ctrl_{cid}"),B("📹 Media",f"media_{cid}")],
+                [B("✂️ Filters",f"flt_{cid}"),B("✨ Style",f"ai_{cid}")],
+                [B("📡 Channels","chs"),B("🏠 Home","main")]]))
     elif d.startswith("dest_pick_"):
-        cid=int(d[10:]); TEMP[uid]={'cid':cid}
-        await show_picker(uid,'dest',0,q.message,cid)
+        cid=int(d[10:]); TEMP[uid]={'cid':cid}; await show_picker(uid,'dest',0,q.message,cid)
 
     # ── CONTROL ──
-    elif d == "ctrl_g": await ED("⚙️ Global Settings", KB_CTRL_G(uid))
-    elif d.startswith("ctrl_") and d[5:].isdigit():
-        cid=int(d[5:]); await ED("⚙️ Control Panel", KB_CTRL(cid))
-
+    elif d=="ctrl_g": await ED("⚙️ All Channels",KB_CTRL_G(uid))
+    elif d.startswith("ctrl_") and d[5:].isdigit(): cid=int(d[5:]); await ED("⚙️ Control",KB_CTRL(cid))
     elif d.startswith("t_copy_"):
-        cid=int(d[7:]); ch=ch_get(cid)
-        if not ch: await ANS("❌",True); return
-        ch_upd(cid,copy_mode=0 if ch['copy_mode'] else 1); await ED("⚙️",KB_CTRL(cid))
+        cid=int(d[7:]); ch=ch_get(cid); ch_upd(cid,copy_mode=0 if ch['copy_mode'] else 1); await ED("⚙️",KB_CTRL(cid))
     elif d.startswith("t_sil_"):
-        cid=int(d[6:]); ch=ch_get(cid)
-        if not ch: await ANS("❌",True); return
-        ch_upd(cid,silent=0 if ch['silent'] else 1); await ED("⚙️",KB_CTRL(cid))
+        cid=int(d[6:]); ch=ch_get(cid); ch_upd(cid,silent=0 if ch['silent'] else 1); await ED("⚙️",KB_CTRL(cid))
     elif d.startswith("t_pin_"):
-        cid=int(d[6:]); ch=ch_get(cid)
-        if not ch: await ANS("❌",True); return
-        ch_upd(cid,pin_msg=0 if ch['pin_msg'] else 1); await ED("⚙️",KB_CTRL(cid))
+        cid=int(d[6:]); ch=ch_get(cid); ch_upd(cid,pin_msg=0 if ch['pin_msg'] else 1); await ED("⚙️",KB_CTRL(cid))
     elif d.startswith("t_cap_"):
-        cid=int(d[6:]); ch=ch_get(cid)
-        if not ch: await ANS("❌",True); return
-        ch_upd(cid,remove_cap=0 if ch['remove_cap'] else 1); await ED("⚙️",KB_CTRL(cid))
+        cid=int(d[6:]); ch=ch_get(cid); ch_upd(cid,remove_cap=0 if ch['remove_cap'] else 1); await ED("⚙️",KB_CTRL(cid))
     elif d.startswith("t_med_"):
-        cid=int(d[6:]); ch=ch_get(cid)
-        if not ch: await ANS("❌",True); return
-        ch_upd(cid,media_only=0 if ch['media_only'] else 1,text_only=0); await ED("⚙️",KB_CTRL(cid))
+        cid=int(d[6:]); ch=ch_get(cid); ch_upd(cid,media_only=0 if ch['media_only'] else 1,text_only=0); await ED("⚙️",KB_CTRL(cid))
     elif d.startswith("t_txt_"):
-        cid=int(d[6:]); ch=ch_get(cid)
-        if not ch: await ANS("❌",True); return
-        ch_upd(cid,text_only=0 if ch['text_only'] else 1,media_only=0); await ED("⚙️",KB_CTRL(cid))
+        cid=int(d[6:]); ch=ch_get(cid); ch_upd(cid,text_only=0 if ch['text_only'] else 1,media_only=0); await ED("⚙️",KB_CTRL(cid))
     elif d.startswith("t_blk_"):
-        cid=int(d[6:]); ch=ch_get(cid)
-        if not ch: await ANS("❌ Not found!",True); return
-        ch_upd(cid,block_links=0 if ch['block_links'] else 1); await ED("⚙️",KB_CTRL(cid))
+        cid=int(d[6:]); ch=ch_get(cid); ch_upd(cid,block_links=0 if ch['block_links'] else 1); await ED("⚙️",KB_CTRL(cid))
     elif d.startswith("t_ball_"):
         cid=int(d[7:]); ch=ch_get(cid)
-        if not ch: await ANS("❌ Not found!",True); return
-        current = bool(ch.get('block_all_links') or ch.get('block_links'))
-        new_val = 0 if current else 1
-        # Only links — @username is separate, NOT touched here
-        ch_upd(cid,
-            block_all_links=new_val,
-            block_links=new_val,
-            block_www=new_val,
-            block_tme=new_val,
-        )
-        await ANS(f"🔴 ALL Links BLOCKED!" if new_val else "⚪ Link blocking OFF", True)
-        await ED("✂️ Filters", KB_FLT(cid))
+        cur=bool(ch.get('block_all_links') or ch.get('block_links')); nv=0 if cur else 1
+        ch_upd(cid,block_all_links=nv,block_links=nv,block_www=nv,block_tme=nv)
+        await ANS("🔴 ALL Links BLOCKED!" if nv else "⚪ OFF",True); await ED("✂️ Filters",KB_FLT(cid))
     elif d.startswith("t_bwww_"):
-        cid=int(d[7:]); ch=ch_get(cid)
-        if not ch: await ANS("❌ Not found!",True); return
-        ch_upd(cid,block_www=0 if ch.get('block_www') else 1); await ED("✂️ Filters",KB_FLT(cid))
+        cid=int(d[7:]); ch=ch_get(cid); ch_upd(cid,block_www=0 if ch.get('block_www') else 1); await ED("✂️",KB_FLT(cid))
     elif d.startswith("t_btme_"):
-        cid=int(d[7:]); ch=ch_get(cid)
-        if not ch: await ANS("❌ Not found!",True); return
-        ch_upd(cid,block_tme=0 if ch.get('block_tme') else 1); await ED("✂️ Filters",KB_FLT(cid))
+        cid=int(d[7:]); ch=ch_get(cid); ch_upd(cid,block_tme=0 if ch.get('block_tme') else 1); await ED("✂️",KB_FLT(cid))
     elif d.startswith("t_bat_"):
-        cid=int(d[6:]); ch=ch_get(cid)
-        if not ch: await ANS("❌ Not found!",True); return
-        ch_upd(cid,block_at=0 if ch.get('block_at') else 1); await ED("✂️ Filters",KB_FLT(cid))
+        cid=int(d[6:]); ch=ch_get(cid); ch_upd(cid,block_at=0 if ch.get('block_at') else 1); await ED("✂️",KB_FLT(cid))
     elif d.startswith("t_dup_"):
-        cid=int(d[6:]); ch=ch_get(cid)
-        if not ch: await ANS("❌",True); return
-        ch_upd(cid,dup_check=0 if ch['dup_check'] else 1); await ED("⚙️",KB_CTRL(cid))
+        cid=int(d[6:]); ch=ch_get(cid); ch_upd(cid,dup_check=0 if ch['dup_check'] else 1); await ED("⚙️",KB_CTRL(cid))
     elif d.startswith("t_bold_"):
-        cid=int(d[7:]); ch=ch_get(cid)
-        if not ch: await ANS("❌",True); return
-        ch_upd(cid,fmt_bold=0 if ch['fmt_bold'] else 1); await ED("📐",KB_FMT(cid))
+        cid=int(d[7:]); ch=ch_get(cid); ch_upd(cid,fmt_bold=0 if ch['fmt_bold'] else 1); await ED("📐",KB_FMT(cid))
     elif d.startswith("t_clean_"):
-        cid=int(d[8:]); ch=ch_get(cid)
-        if not ch: await ANS("❌",True); return
-        ch_upd(cid,fmt_clean=0 if ch['fmt_clean'] else 1); await ED("📐",KB_FMT(cid))
-
+        cid=int(d[8:]); ch=ch_get(cid); ch_upd(cid,fmt_clean=0 if ch['fmt_clean'] else 1); await ED("📐",KB_FMT(cid))
     elif d.startswith("s_dly_"):
         cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_DLY
-        m=await q.message.reply_text("⏱ Delay seconds (0-3600):\n\n/cancel")
-        TEMP[uid]['prompt_id']=m.message_id
+        m=await q.message.reply_text("⏱ Delay seconds (0-3600):\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("s_hdr_"):
-        cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_HDR
-        m=await q.message.reply_text("📝 Header text bhejo:\n(- for none)\n\n/cancel")
+        cid=int(d[6:]); ch=ch_get(cid); cur=ch.get('header','') or ''
+        TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_HDR
+        m=await q.message.reply_text(f"📝 Header bhejo:\n{'Current: '+_short(cur,40) if cur else 'None'}\n\n(- = clear)\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("s_ftr_"):
-        cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_FTR
-        m=await q.message.reply_text("📝 Footer text bhejo:\n(- for none)\n\n/cancel")
+        cid=int(d[6:]); ch=ch_get(cid); cur=ch.get('footer','') or ''
+        TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_FTR
+        m=await q.message.reply_text(f"📝 Footer bhejo:\n{'Current: '+_short(cur,40) if cur else 'None'}\n\n(- = clear)\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
 
     # ── FORMAT ──
-    elif d.startswith("fmt_"): cid=int(d[4:]); await ED("📐 Format",KB_FMT(cid))
+    elif d.startswith("fmt_") and d[4:].isdigit(): cid=int(d[4:]); await ED("📐",KB_FMT(cid))
+    elif d=="fmt_g": await ED("📐 Format",KB_FMT_G(uid))
 
-    # ── AI ──
-    elif d == "ai_g": await ED("🤖 AI Settings",KB_AI_G(uid))
-    elif d.startswith("ai_") and d[3:].isdigit(): cid=int(d[3:]); await ED("🤖 AI",KB_AI(cid))
-    elif d.startswith("t_ai_"):
-        cid=int(d[5:]); ch=ch_get(cid); ch_upd(cid,ai_on=0 if ch['ai_on'] else 1); await ED("🤖",KB_AI(cid))
-
-    elif d.startswith("fs_set_"):
-        rest = d[7:]
-        parts = rest.split('_')
-        cid = int(parts[0])
-        style_key = '_'.join(parts[1:])
-        ch_upd(cid, free_style=style_key)
-        label = FREE_STYLES.get(style_key, ("?",))[0]
-        await ANS(f"✅ {label}", True)
-        await ED("✨ Style", KB_AI(cid))
-
+    # ── TEXT STYLE ──
+    elif d=="ai_g": await ED("✨ Text Style",KB_AI_G(uid))
+    elif d.startswith("ai_") and d[3:].isdigit(): cid=int(d[3:]); await ED("✨ Style",KB_AI(cid))
+    elif d.startswith("st_tog_"):
+        rest=d[7:]; ui=rest.index('_'); cid=int(rest[:ui]); sk=rest[ui+1:]
+        ch=ch_get(cid)
+        if not ch: await ANS("❌",True); return
+        cur=parse_style_set(ch.get('free_style','none'))
+        if sk in cur:
+            cur.discard(sk)
+            if sk in STYLE_COMBOS:
+                for sub in STYLE_COMBOS[sk]: cur.discard(sub)
+        else:
+            cur.add(sk)
+            if sk in STYLE_COMBOS:
+                for sub in STYLE_COMBOS[sk]: cur.add(sub)
+        ch_upd(cid,free_style=encode_style_set(cur))
+        await ANS(f"{'✅' if sk in cur else '☐'} {STYLE_DEFS.get(sk,sk)}",False); await ED("✨ Style",KB_AI(cid))
+    elif d.startswith("st_clr_"):
+        cid=int(d[7:]); ch_upd(cid,free_style='none'); await ANS("🗑 Cleared!",True); await ED("✨ Style",KB_AI(cid))
     elif d.startswith("emoji_set_"):
-        cid = int(d[10:])
-        TEMP[uid] = {'cid': cid}; ctx.user_data['st'] = ST_EMOJI
-        m = await q.message.reply_text(
-            "😊 Emoji bhejo jo messages mein add karna hai:\n\n"
-            "Example: 🔥  ya  ✅  ya  📊🔥\n\n/cancel"
-        )
-        TEMP[uid]['prompt_id'] = m.message_id
-
+        cid=int(d[10:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_EMOJI
+        m=await q.message.reply_text("😊 Emoji bhejo:\n\nExample: 🔥  ✅  📊🔥\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("emoji_pos_"):
-        rest = d[10:]
-        idx = rest.index('_')
-        cid = int(rest[:idx]); pos = rest[idx+1:]
-        ch_upd(cid, emoji_pos=pos)
-        await ANS(f"✅ {EMOJI_POS.get(pos,'?')}", True)
-        await ED("✨ Style", KB_AI(cid))
-
+        rest=d[10:]; i=rest.index('_'); cid=int(rest[:i]); pos=rest[i+1:]
+        ch_upd(cid,emoji_pos=pos); await ANS(f"✅ {EMOJI_POS.get(pos,'?')}",True); await ED("✨ Style",KB_AI(cid))
     elif d.startswith("emoji_clr_"):
-        cid = int(d[10:])
-        ch_upd(cid, emoji_str='', emoji_pos='off')
-        await ANS("🗑 Emoji cleared!", True)
-        await ED("✨ Style", KB_AI(cid))
-
-    elif d == "ai_g_all":
-        await ED("🌐 Change ALL Channels Style", KB_AI_GLOBAL(uid))
-
+        cid=int(d[10:]); ch_upd(cid,emoji_str='',emoji_pos='off'); await ANS("🗑 Cleared!",True); await ED("✨ Style",KB_AI(cid))
+    elif d=="ai_g_all": await ED("🌐 Change ALL",KB_AI_GLOBAL(uid))
     elif d.startswith("ai_g_set_"):
-        style = d[9:]
-        chs = ch_all(uid)
-        for ch in chs:
-            ch_upd(ch['id'], free_style=style)
-        label = FREE_STYLES.get(style, ('?',))[0]
-        await ANS(f"✅ {len(chs)} channels → {label}", True)
-        await ED("✨ Text Style", KB_AI_G(uid))
-    elif d.startswith("ai_s_"):
-        parts=d.split("_"); cid=int(parts[2]); style="_".join(parts[3:])
-        ch_upd(cid,ai_style=style); (ch_upd(cid,ai_on=1) if style!='none' else None)
-        await ANS(f"✅ {AI_STYLES.get(style,('?',))[0]}",True); await ED("🤖",KB_AI(cid))
-    elif d.startswith("ai_cp_"):
-        cid=int(d[6:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_AIP
-        m=await q.message.reply_text("✏️ Custom AI prompt:\n\nExample: 'Rewrite as breaking news in Hindi'\n\n/cancel")
-        TEMP[uid]['prompt_id']=m.message_id
+        style=d[9:]; chs=ch_all(uid)
+        for ch in chs: ch_upd(ch['id'],free_style='none' if style=='none' else style)
+        await ANS(f"✅ {len(chs)} channels updated",True); await ED("✨ Style",KB_AI_G(uid))
     elif d.startswith("ai_t_"):
         cid=int(d[5:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_AIT
-        m=await q.message.reply_text("🧪 Test text bhejo:\n\n/cancel")
-        TEMP[uid]['prompt_id']=m.message_id
+        m=await q.message.reply_text("🧪 Test text bhejo:\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
 
     # ── REPLACEMENTS ──
-    elif d == "repl_g": await ED("🔄 Replacements",KB_REPL_G(uid))
-    elif d.startswith("repls_"):    cid=int(d[6:]); await ED("🔄",KB_REPLS(cid))
-    elif d.startswith("lrp_"):
-        cid=int(d[4:]); lrp=rp_get(cid,'link')
-        rows=[[B(f"🔗 Link Replace ({len(lrp)})","noop")]]
-        for r in lrp: rows.append([B(f"🔗 {r['old_val'][:24]}→{r['new_val'][:14]}","noop"),B("🗑",f"d_rp_{r['id']}")])
-        rows.append([B("➕ Add",f"add_lrp_{cid}")]); rows.append([B("‹ Back",f"ch_{cid}"),B("🏠","main")])
-        await ED("🔗 Link Replace",IM(rows))
-    elif d.startswith("wrp_"):
-        cid=int(d[4:]); wrp=rp_get(cid,'word')
-        rows=[[B(f"📝 Word Replace ({len(wrp)})","noop")]]
-        for r in wrp: rows.append([B(f"📝 {r['old_val'][:24]}→{r['new_val'][:14]}","noop"),B("🗑",f"d_rp_{r['id']}")])
-        rows.append([B("➕ Add",f"add_wrp_{cid}")]); rows.append([B("‹ Back",f"ch_{cid}"),B("🏠","main")])
-        await ED("📝 Word Replace",IM(rows))
+    elif d=="repl_g": await ED("🔄 Replacements",KB_REPL_G(uid))
+    elif d.startswith("repls_"): cid=int(d[6:]); await ED("🔄",KB_REPLS(cid))
     elif d.startswith("add_lrp_"):
         cid=int(d[8:]); TEMP[uid]={'cid':cid,'rt':'link'}; ctx.user_data['st']=ST_LO
-        m=await q.message.reply_text("🔗 Purana link bhejo:\n(Jo replace hoga)\n\n/cancel")
-        TEMP[uid]['prompt_id']=m.message_id
+        m=await q.message.reply_text("🔗 Purana link bhejo:\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("add_wrp_"):
         cid=int(d[8:]); TEMP[uid]={'cid':cid,'rt':'word'}; ctx.user_data['st']=ST_WO
-        m=await q.message.reply_text("📝 Purana word bhejo:\n(Jo replace hoga)\n\n/cancel")
+        m=await q.message.reply_text("📝 Purana word bhejo:\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
+    elif d.startswith("add_prp_"):
+        cid=int(d[8:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_PRO
+        m=await q.message.reply_text("📋 Para Replace\n\nTrigger word bhejo:\n(Jis paragraph mein ye word ho)\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("d_rp_"): rp_del(int(d[5:])); await ANS("✅ Removed!")
 
     # ── FILTERS ──
-    elif d.startswith("flt_"):
-        cid=int(d[4:]); ch=ch_get(cid)
-        if not ch: await ANS("❌ Not found!",True); return
-        await ED("✂️ Filters",KB_FLT(cid))
+    elif d.startswith("flt_"): cid=int(d[4:]); await ED("✂️ Filters",KB_FLT(cid))
     elif d.startswith("add_wl_"):
         cid=int(d[7:]); TEMP[uid]={'cid':cid,'ft':'whitelist'}; ctx.user_data['st']=ST_WL
-        m=await q.message.reply_text("✅ Whitelist word bhejo:\n(Sirf ye forward honge)\n\n/cancel")
-        TEMP[uid]['prompt_id']=m.message_id
+        m=await q.message.reply_text("✅ Whitelist word:\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("add_bl_"):
         cid=int(d[7:]); TEMP[uid]={'cid':cid,'ft':'blacklist'}; ctx.user_data['st']=ST_BL
-        m=await q.message.reply_text("🚫 Blacklist word bhejo:\n(Ye skip honge)\n\n/cancel")
+        m=await q.message.reply_text("🚫 Blacklist word:\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
+    elif d.startswith("add_pb_"):
+        cid=int(d[7:]); TEMP[uid]={'cid':cid,'ft':'para_block'}; ctx.user_data['st']=ST_PB
+        m=await q.message.reply_text(
+            "📝 Para Block\n\nTrigger word bhejo:\nJis paragraph mein ye word hoga wo DELETE ho jaayega.\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("d_flt_"): f_del(int(d[6:])); await ANS("✅ Removed!")
 
@@ -1934,274 +1466,206 @@ async def cbk(update: Update, ctx):
         await ANS("✅ Removed!"); await ED("📤",KB_DESTS(cid))
 
     # ── SUBSCRIPTION ──
-    elif d == "sub": await ED("💳 Subscription",KB_SUB(uid))
-    elif d == "sub_renew":
-        plans = [p for p in plan_all() if p['enabled']]
-        rows = [B(f"{p['label']}  ₹{p['price']}  {p['days']}d", f"buy_{p['key']}") for p in plans]
-        rows_kb = [[r] for r in rows] + [[B("‹ Back","sub")]]
-        await ED(
-            f"🔄 Plan Renewal\n\nCurrent: {u_sub_str(uid)}\nExpires: {u_sub_end_str(uid)}\n\nPlan choose karo 👇",
-            IM(rows_kb)
-        )
+    elif d=="sub": await ED("💳 Subscription",KB_SUB(uid))
+    elif d=="sub_renew":
+        plans=[p for p in plan_all() if p['enabled']]
+        rows=[[B(f"{p['label']}  ₹{p['price']}  {p['days']}d",f"buy_{p['key']}")] for p in plans]+[[B("‹ Back","sub")]]
+        await ED(f"🔄 Renewal\n\nCurrent: {u_sub_str(uid)}\n\nPlan choose karo 👇",IM(rows))
     elif d.startswith("buy_"):
         pk=d[4:]; pl=plan_get(pk)
-        if not pl: await ANS("❌ Plan not found!",True); return
-        label=pl['label']; days=pl['days']; price=pl['price']
+        if not pl: await ANS("❌ Not found!",True); return
+        mx=pl.get('max_channels',0); ct="Unlimited channels" if mx==0 else f"Max {mx} channel(s)"
         await ED(
-            f"💳 {label} Plan\n\n"
-            f"💰 Price  : ₹{price}\n"
-            f"⏳ Period : {days} days\n\n"
-            f"Payment Steps:\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"1️⃣  UPI: (contact admin)\n"
-            f"2️⃣  Amount: ₹{price}\n"
-            f"3️⃣  Screenshot lo\n"
-            f"4️⃣  Admin ko bhejo: {ADMIN_USERNAME}\n"
-            f"5️⃣  Write: Plan:{label} | ID:{uid}\n\n"
-            f"✅  Admin activates in 5-10 min",
-            KB([B(f"💬 Contact {ADMIN_USERNAME}","support"),B("‹ Back","sub")])
-        )
-    elif d == "contact_admin": await ED(f"💬 Admin: {ADMIN_USERNAME}\n\nYour ID: `{uid}`",KB([B("‹ Back","sub")]))
+            f"💳 {pl['label']}\n\n💰 Price: ₹{pl['price']}\n⏳ Period: {pl['days']} days\n📡 {ct}\n\n"
+            f"Payment:\n━━━━━━━━━\n1️⃣  UPI: (contact admin)\n2️⃣  Amount: ₹{pl['price']}\n"
+            f"3️⃣  Screenshot → {ADMIN_USERNAME}\n4️⃣  Write: Plan:{pl['label']} | ID:{uid}\n✅ Activated in 5-10 min",
+            KB([B(f"💬 Contact {ADMIN_USERNAME}","support"),B("‹ Back","sub")]))
 
     # ── STATS ──
-    elif d == "stats":
-        tf,td,tw=l_stats(uid); chs=ch_all(uid)
-        on_c=sum(1 for c in chs if c['enabled']); ai_c=sum(1 for c in chs if c['ai_on'])
+    elif d=="stats":
+        tf,td,tw=l_stats(uid); chs=ch_all(uid); on_c=sum(1 for c in chs if c['enabled'])
         eng="🟢 Running" if uid in ACL else "🔴 Stopped"
+        cur,mx=u_channel_limit(uid); lt=f"{cur}/{mx}" if mx>0 else f"{cur}/∞"
         await ED(
-            f"📊  My Statistics\n\n"
-            f"📨 Total Forwarded : {tf}\n"
-            f"📅 Today           : {td}\n"
-            f"📆 This Week       : {tw}\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"📡 Channels        : {len(chs)}\n"
-            f"🟢 Active          : {on_c}\n"
-            f"🤖 AI Enabled      : {ai_c}\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"⚡ Engine          : {eng}\n"
-            f"💳 {u_sub_str(uid)}",
-            KB([B("‹ Back","main")])
-        )
+            f"📊  Statistics\n\n📨 Total Fwd : {tf}\n📅 Today     : {td}\n📆 This Week : {tw}\n"
+            f"━━━━━━━━━━━━━\n📡 Channels  : {len(chs)}  [{lt}]\n🟢 Active    : {on_c}\n"
+            f"━━━━━━━━━━━━━\n⚡ Engine    : {eng}\n💳 {u_sub_str(uid)}",
+            KB([B("‹ Back","main")]))
 
-# ─── Admin callbacks ─────────────────────────────────────────────
-async def _admin_cbk(d, uid, q, ctx, ED, ANS):
-    if d in ("main","adm"): await ED("🔧 Admin Panel", KB_ADM()); return
-
-    elif d == "a_users":
+# ── ADMIN CALLBACKS ────────────────────────────────────────────
+async def _admin_cbk(d,uid,q,ctx,ED,ANS):
+    if d in ("main","adm"): await ED("🔧 Admin Panel",KB_ADM()); return
+    elif d=="a_users":
         users=u_all(); lines=[]
         for u in users[:25]:
             st="✅" if u_ok(u['uid']) else "❌"; bn="🚫" if u['is_banned'] else ""
             lines.append(f"{st}{bn} {u.get('name','?')[:12]} | `{u['uid']}` | {u['total_fwd']}fwd")
-        await ED(f"👥 All Users ({len(users)})\n\n"+"\n".join(lines)+(f"\n...+{len(users)-25} more" if len(users)>25 else ""),KB([B("‹ Back","adm")]))
-
-    elif d == "a_active":
+        await ED(f"👥 Users ({len(users)})\n\n"+"\n".join(lines)+(f"\n...+{len(users)-25} more" if len(users)>25 else ""),KB([B("‹ Back","adm")]))
+    elif d=="a_active":
         users=[u for u in u_all() if u_ok(u['uid'])]
         lines=[f"✅ {u.get('name','?')[:14]} | `{u['uid']}` | {u_sub_str(u['uid'])}" for u in users[:25]]
-        await ED(f"✅ Active Subs ({len(users)})\n\n"+"\n".join(lines or ["None"]),KB([B("‹ Back","adm")]))
-
-    elif d == "a_stats":
+        await ED(f"✅ Active ({len(users)})\n\n"+"\n".join(lines or ["None"]),KB([B("‹ Back","adm")]))
+    elif d=="a_stats":
         tu,au,tf,tr,tb,td,nw=adm_stats()
         import datetime; today=datetime.date.today().strftime("%d %b %Y")
-        await ED(
-            f"📊 Admin Stats  •  {today}\n\n"
-            f"👥 Total Users   : {tu}\n"
-            f"✅ Active Subs   : {au}\n"
-            f"❌ No Sub        : {tu-au-tb}\n"
-            f"🚫 Banned        : {tb}\n"
-            f"🆕 New (7d)      : {nw}\n"
-            f"⚡ Live Engines  : {len(ACL)}\n"
-            f"━━━━━━━━━━━━━━━━━\n"
-            f"📨 Total Fwd     : {tf}\n"
-            f"📅 Today Fwd     : {td}\n"
-            f"📡 Total Channels: {tr}",
-            KB([B("‹ Back","adm")])
-        )
-
-    elif d == "a_revenue":
+        await ED(f"📊 Stats  •  {today}\n\n👥 Total: {tu}\n✅ Active: {au}\n🚫 Banned: {tb}\n🆕 New(7d): {nw}\n⚡ Engines: {len(ACL)}\n━━━━━━━━━━━\n📨 Total Fwd: {tf}\n📅 Today Fwd: {td}\n📡 Channels: {tr}",KB([B("‹ Back","adm")]))
+    elif d=="a_revenue":
         users=u_all(); au=sum(1 for u in users if u_ok(u['uid']))
-        plans = plan_all()
-        lines = "\n".join([f"  {p['label']} ₹{p['price']} × ? users" for p in plans])
-        m_plan = next((p['price'] for p in plans if p['key']=='m'), 49)
-        await ED(
-            f"💰 Revenue Dashboard\n\n"
-            f"✅ Active Subscribers: {au}\n"
-            f"💵 Est. Revenue (all monthly): ₹{au*m_plan}\n\n"
-            f"Plans:\n{lines}",
-            KB([B("💳 Manage Plans","a_plans"), B("‹ Back","adm")])
-        )
-
-    elif d == "a_chs":
-        c=DB()
-        rows=c.execute("SELECT ch.id,ch.ch_name,ch.uid,ch.enabled,u.name FROM channels ch LEFT JOIN users u ON ch.uid=u.uid ORDER BY ch.id DESC LIMIT 30").fetchall()
-        c.close()
+        plans=plan_all(); mp=next((p['price'] for p in plans if p['key']=='m'),49)
+        lines="\n".join([f"  {p['label']} ₹{p['price']} | ch: {'∞' if p.get('max_channels',0)==0 else p['max_channels']}" for p in plans])
+        await ED(f"💰 Revenue\n\n✅ Active: {au}\n💵 Est.(monthly): ₹{au*mp}\n\nPlans:\n{lines}",KB([B("💳 Plans","a_plans"),B("‹ Back","adm")]))
+    elif d=="a_chs":
+        c=DB(); rows=c.execute("SELECT ch.id,ch.ch_name,ch.uid,ch.enabled FROM channels ch ORDER BY ch.id DESC LIMIT 30").fetchall(); c.close()
         lines=[f"{'🟢' if r['enabled'] else '🔴'} {r['ch_name'][:16]} | uid:{r['uid']}" for r in rows]
-        await ED(f"📡 All Channels ({len(rows)})\n\n"+"\n".join(lines or ["None"]),KB([B("‹ Back","adm")]))
-
-    elif d == "a_restart":
-        await ANS("🔄 Restarting all...",True); asyncio.create_task(eng_restart_all())
-
-    elif d == "a_search":
-        ctx.user_data['st']=ST_SRCH; await q.message.reply_text("🔍 User ID or username bhejo:\n\n/cancel")
-
-    elif d == "a_give":   ctx.user_data['st']=ST_GID; ctx.user_data['sa']='give';   await q.message.reply_text("✅ User ID (sub deni hai):\n\n/cancel")
-    elif d == "a_revoke": ctx.user_data['st']=ST_GID; ctx.user_data['sa']='revoke'; await q.message.reply_text("❌ User ID (sub revoke):\n\n/cancel")
-    elif d == "a_ban":    ctx.user_data['st']=ST_GID; ctx.user_data['sa']='ban';    await q.message.reply_text("🚫 User ID (ban karna):\n\n/cancel")
-    elif d == "a_unban":  ctx.user_data['st']=ST_GID; ctx.user_data['sa']='unban';  await q.message.reply_text("✅ User ID (unban karna):\n\n/cancel")
-    elif d == "a_bc_all": ctx.user_data['st']=ST_BC; ctx.user_data['bt']='all';    await q.message.reply_text("📢 Message (ALL users):\n\n/cancel")
-    elif d == "a_bc_act": ctx.user_data['st']=ST_BC; ctx.user_data['bt']='active'; await q.message.reply_text("📢 Message (ACTIVE only):\n\n/cancel")
-
-    # ── PLAN MANAGEMENT ──
-    elif d == "a_plans":
-        await ED("💳 Plan Management", KB_PLANS())
-
-    elif d == "a_trial":
-        ctx.user_data['st'] = ST_TRIAL
-        await q.message.reply_text(
-            f"🎁 Trial Days change karo\n\n"
-            f"Current: {get_trial_days()} days\n\n"
-            f"Naya number bhejo (e.g. 7):\n\n/cancel"
-        )
-
+        await ED(f"📡 Channels ({len(rows)})\n\n"+"\n".join(lines or ["None"]),KB([B("‹ Back","adm")]))
+    elif d=="a_restart":
+        await ANS("🔄 Restarting...",True); asyncio.create_task(eng_restart_all())
+    elif d=="a_search": ctx.user_data['st']=ST_SRCH; await q.message.reply_text("🔍 User ID:\n\n/cancel")
+    elif d=="a_give":   ctx.user_data['st']=ST_GID; ctx.user_data['sa']='give';   await q.message.reply_text("✅ User ID:\n\n/cancel")
+    elif d=="a_revoke": ctx.user_data['st']=ST_GID; ctx.user_data['sa']='revoke'; await q.message.reply_text("❌ User ID:\n\n/cancel")
+    elif d=="a_ban":    ctx.user_data['st']=ST_GID; ctx.user_data['sa']='ban';    await q.message.reply_text("🚫 User ID:\n\n/cancel")
+    elif d=="a_unban":  ctx.user_data['st']=ST_GID; ctx.user_data['sa']='unban';  await q.message.reply_text("✅ User ID:\n\n/cancel")
+    elif d=="a_bc_all": ctx.user_data['st']=ST_BC; ctx.user_data['bt']='all';    await q.message.reply_text("📢 Message (ALL):\n\n/cancel")
+    elif d=="a_bc_act": ctx.user_data['st']=ST_BC; ctx.user_data['bt']='active'; await q.message.reply_text("📢 Message (ACTIVE):\n\n/cancel")
+    elif d=="a_plans": await ED("💳 Plans",KB_PLANS())
+    elif d=="a_trial":
+        ctx.user_data['st']=ST_TRIAL
+        await q.message.reply_text(f"🎁 Trial Days\nCurrent: {get_trial_days()}\nNaya number:\n\n/cancel")
     elif d.startswith("a_plan_tog_"):
-        pk = d[11:]
-        p = plan_get(pk)
-        if p:
-            plan_upd(pk, enabled=0 if p['enabled'] else 1)
-            await ANS(f"{'🟢 Enabled' if not p['enabled'] else '🔴 Disabled'}", True)
-        await ED("💳 Plan Management", KB_PLANS())
-
+        pk=d[11:]; p=plan_get(pk)
+        if p: plan_upd(pk,enabled=0 if p['enabled'] else 1)
+        await ANS(f"{'🟢' if not p['enabled'] else '🔴'}",True); await ED("💳 Plans",KB_PLANS())
     elif d.startswith("a_plan_del_"):
-        pk = d[11:]
-        plan_del(pk)
-        await ANS("🗑 Plan deleted!", True)
-        await ED("💳 Plan Management", KB_PLANS())
-
+        pk=d[11:]; plan_del(pk); await ANS("🗑 Deleted!",True); await ED("💳 Plans",KB_PLANS())
     elif d.startswith("a_plan_edit_"):
-        pk = d[12:]
-        p = plan_get(pk)
+        pk=d[12:]; p=plan_get(pk)
         if not p: return
-        TEMP[uid] = {'plan_key': pk, 'step': 'price'}
-        ctx.user_data['st'] = ST_PLAN_PRICE
-        await q.message.reply_text(
-            f"✏️ Edit Plan: {p['label']}\n\n"
-            f"Current Price: ₹{p['price']}\n"
-            f"Current Days: {p['days']}\n\n"
-            f"Naya PRICE bhejo (₹):\n\n/cancel"
-        )
-
-    elif d == "a_plan_add":
-        TEMP[uid] = {'step': 'new_plan'}
-        ctx.user_data['st'] = ST_PLAN_NEW
-        await q.message.reply_text(
-            "➕ New Plan Add\n\n"
-            "Format mein bhejo:\n"
-            "LABEL,DAYS,PRICE\n\n"
-            "Example:\n"
-            "💎 Premium,90,149\n\n/cancel"
-        )
+        TEMP[uid]={'plan_key':pk}; ctx.user_data['st']=ST_PLAN_PRICE
+        mx=p.get('max_channels',0)
+        await q.message.reply_text(f"✏️ Edit: {p['label']}\n\nPrice: ₹{p['price']}\nDays: {p['days']}\nMax Ch: {'∞' if mx==0 else mx}\n\nNaya PRICE (₹):\n\n/cancel")
+    elif d=="a_plan_add":
+        ctx.user_data['st']=ST_PLAN_NEW
+        await q.message.reply_text("➕ New Plan\n\nFormat: LABEL,DAYS,PRICE,MAX_CH\nExample: 💎 Pro,90,149,5\n(MAX_CH=0 = unlimited)\n\n/cancel")
 
 # ═══════════════════════════════════════════════════════════════
 #   MESSAGE HANDLER
 # ═══════════════════════════════════════════════════════════════
-async def msg_hdl(update: Update, ctx):
-    uid=update.effective_user.id; txt=(update.message.text or "").strip()
-    st=ctx.user_data.get('st')
+async def msg_hdl(update:Update,ctx):
+    uid=update.effective_user.id; txt=(update.message.text or "").strip(); st=ctx.user_data.get('st')
 
-    async def _del_prompt():
+    async def _dp():
         pid=TEMP.get(uid,{}).get('prompt_id')
         if pid:
             try: await ctx.bot.delete_message(uid,pid)
             except: pass
-
-    async def _del_user():
+    async def _du():
         try: await update.message.delete()
         except: pass
 
     if txt=="/cancel":
-        await _del_prompt()
-        ctx.user_data.clear(); TEMP.pop(uid,None)
-        kb=KB_ADM() if uid in ADMIN_IDS else (KB_MAIN(uid) if s_get(uid) else None)
-        await update.message.reply_text("❌ Cancelled.",reply_markup=kb); return
+        await _dp(); ctx.user_data.clear(); TEMP.pop(uid,None)
+        await update.message.reply_text("❌ Cancelled.",
+            reply_markup=KB_ADM() if uid in ADMIN_IDS else (KB_MAIN(uid) if s_get(uid) else None))
+        return
 
     def _cid(): return TEMP.get(uid,{}).get('cid')
 
     if st==ST_REN:
         cid=_cid(); ch_upd(cid,ch_name=txt[:30])
-        await _del_prompt(); await _del_user()
-        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        await _dp(); await _du(); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
         await update.message.reply_text(f"✅ Renamed: {txt[:30]}",reply_markup=KB([B("‹ Back",f"ch_{cid or 0}")]))
 
     elif st==ST_LO:
         TEMP.setdefault(uid,{})['old']=txt; ctx.user_data['st']=ST_LN
-        await _del_prompt(); await _del_user()
-        m=await update.message.reply_text(f"✅ Old: `{txt}`\nNaya bhejo:\n\n/cancel")
-        TEMP[uid]['prompt_id']=m.message_id
+        await _dp(); await _du()
+        m=await update.message.reply_text(f"✅ Old: `{txt}`\nNaya link bhejo:\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
     elif st==ST_LN:
-        cid=_cid(); old=TEMP.get(uid,{}).get('old','')
-        rp_add(cid,uid,'link',old,txt)
-        await _del_prompt(); await _del_user()
-        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ `{old}` → `{txt}`",reply_markup=KB([B("➕ More",f"add_lrp_{cid or 0}"),B("‹ Back",f"lrp_{cid or 0}")]))
+        cid=_cid(); old=TEMP.get(uid,{}).get('old',''); rp_add(cid,uid,'link',old,txt)
+        await _dp(); await _du(); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        await update.message.reply_text(f"✅ `{old}` → `{txt}`",reply_markup=KB([B("➕ More",f"add_lrp_{cid or 0}"),B("‹",f"repls_{cid or 0}")]))
 
     elif st==ST_WO:
         TEMP.setdefault(uid,{})['old']=txt; ctx.user_data['st']=ST_WN
-        await _del_prompt(); await _del_user()
-        m=await update.message.reply_text(f"✅ Old: `{txt}`\nNaya bhejo:\n\n/cancel")
-        TEMP[uid]['prompt_id']=m.message_id
+        await _dp(); await _du()
+        m=await update.message.reply_text(f"✅ Old: `{txt}`\nNaya word bhejo:\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
     elif st==ST_WN:
-        cid=_cid(); old=TEMP.get(uid,{}).get('old','')
-        rp_add(cid,uid,'word',old,txt)
-        await _del_prompt(); await _del_user()
-        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ `{old}` → `{txt}`",reply_markup=KB([B("➕ More",f"add_wrp_{cid or 0}"),B("‹ Back",f"wrp_{cid or 0}")]))
+        cid=_cid(); old=TEMP.get(uid,{}).get('old',''); rp_add(cid,uid,'word',old,txt)
+        await _dp(); await _du(); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        await update.message.reply_text(f"✅ `{old}` → `{txt}`",reply_markup=KB([B("➕ More",f"add_wrp_{cid or 0}"),B("‹",f"repls_{cid or 0}")]))
 
-    elif st in (ST_WL,ST_BL):
+    elif st==ST_PRO:
+        TEMP.setdefault(uid,{})['old']=txt; ctx.user_data['st']=ST_PRN
+        await _dp(); await _du()
+        m=await update.message.reply_text(
+            f"📋 Para Replace — Step 2\n\nTrigger: `{txt}`\n\nAb replacement text bhejo:\n('-' = paragraph delete karo)\n\n/cancel")
+        TEMP[uid]['prompt_id']=m.message_id
+    elif st==ST_PRN:
+        cid=_cid(); old=TEMP.get(uid,{}).get('old',''); rp_add(cid,uid,'para',old,txt)
+        await _dp(); await _du(); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        action="🗑 Delete paragraph" if txt=='-' else f"Replace → {_short(txt,30)}"
+        await update.message.reply_text(f"✅ Para Replace!\n\nIf para has: `{old}`\n→ {action}",
+            reply_markup=KB([B("➕ More",f"add_prp_{cid or 0}"),B("‹",f"repls_{cid or 0}")]))
+
+    elif st in (ST_WL,ST_BL,ST_PB):
         cid=_cid(); ft=TEMP.get(uid,{}).get('ft','whitelist')
-        f_add(cid,uid,ft,txt)
-        await _del_prompt(); await _del_user()
+        f_add(cid,uid,ft,txt); await _dp(); await _du()
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        icon="✅" if ft=='whitelist' else "🚫"
-        await update.message.reply_text(f"{icon} `{txt}`",reply_markup=KB([B("➕ More",f"add_{'wl' if ft=='whitelist' else 'bl'}_{cid or 0}"),B("‹ Back",f"flt_{cid or 0}")]))
+        icon={"whitelist":"✅","blacklist":"🚫","para_block":"📝"}.get(ft,"✅")
+        lbl={"whitelist":"Whitelist","blacklist":"Blacklist","para_block":"Para Block"}.get(ft,ft)
+        kb_add={"whitelist":f"add_wl_{cid or 0}","blacklist":f"add_bl_{cid or 0}","para_block":f"add_pb_{cid or 0}"}.get(ft,f"flt_{cid or 0}")
+        await update.message.reply_text(f"{icon} {lbl}: `{txt}`",reply_markup=KB([B("➕ More",kb_add),B("‹",f"flt_{cid or 0}")]))
 
     elif st==ST_DLY:
         cid=_cid()
         try:
             v=max(0,min(3600,int(txt))); ch_upd(cid,delay_sec=v)
-            await _del_prompt(); await _del_user()
-            await update.message.reply_text(f"✅ Delay: {v}s",reply_markup=KB([B("‹ Back",f"ctrl_{cid or 0}")]))
-        except: await update.message.reply_text("❌ Number (0-3600) bhejo!")
+            await _dp(); await _du()
+            await update.message.reply_text(f"✅ Delay: {v}s",reply_markup=KB([B("‹",f"ctrl_{cid or 0}")]))
+        except: await update.message.reply_text("❌ Number (0-3600)!")
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
 
     elif st==ST_HDR:
         cid=_cid(); ch_upd(cid,header="" if txt=="-" else txt)
-        await _del_prompt(); await _del_user()
-        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ Header {'cleared' if txt==chr(45) else 'set'}!",reply_markup=KB([B("‹ Back",f"ctrl_{cid or 0}")]))
+        await _dp(); await _du(); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        p=f"\nPreview: {_short(txt,40)}" if txt!="-" else ""
+        await update.message.reply_text(f"✅ Header {'cleared' if txt=='-' else 'set'}!{p}",reply_markup=KB([B("‹",f"ctrl_{cid or 0}")]))
 
     elif st==ST_FTR:
         cid=_cid(); ch_upd(cid,footer="" if txt=="-" else txt)
-        await _del_prompt(); await _del_user()
-        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ Footer {'cleared' if txt==chr(45) else 'set'}!",reply_markup=KB([B("‹ Back",f"ctrl_{cid or 0}")]))
-
-    elif st==ST_AIP:
-        cid=_cid(); ch_upd(cid,ai_prompt=txt,ai_style='custom',ai_on=1)
-        await _del_prompt(); await _del_user()
-        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text("✅ Custom AI saved! 🤖",reply_markup=KB([B("🧪 Test",f"ai_t_{cid or 0}"),B("‹ Back",f"ai_{cid or 0}")]))
+        await _dp(); await _du(); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        p=f"\nPreview: {_short(txt,40)}" if txt!="-" else ""
+        await update.message.reply_text(f"✅ Footer {'cleared' if txt=='-' else 'set'}!{p}",reply_markup=KB([B("‹",f"ctrl_{cid or 0}")]))
 
     elif st==ST_AIT:
         cid=_cid(); ch=ch_get(cid) if cid else None
-        await _del_prompt(); await _del_user()
-        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        await _dp(); await _du(); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
         if not ch: await update.message.reply_text("❌ Channel not found."); return
-        await update.message.reply_text("⏳ AI rewriting...")
-        result=await ai_rewrite(txt,ch)
-        style=AI_STYLES.get(ch.get('ai_style','none'),('?','?'))
+        await update.message.reply_text("⏳ Processing...")
+        styled,use_html=await ai_rewrite(txt,ch)
+        hdr=(ch.get('header') or '').strip(); ftr=(ch.get('footer') or '').strip()
+        ss=ch.get('free_style','none')
+        if hdr:
+            h,_=apply_styles(hdr,ss) if (ss and ss!='none') else (_he(hdr) if use_html else hdr,False)
+            styled=f"{h}\n\n{styled}" if styled else h
+        if ftr:
+            f2,_=apply_styles(ftr,ss) if (ss and ss!='none') else (_he(ftr) if use_html else ftr,False)
+            styled=f"{styled}\n\n{f2}" if styled else f2
+        para_r=para_process(txt,ch['id']); para_note=f"\n📝 Para: {'[BLOCKED]' if para_r is None else _short(para_r,40)}"
+        active=parse_style_set(ch.get('free_style','none'))
         await update.message.reply_text(
-            f"🤖 AI Test ({style[0]})\n\n📥 Original:\n{txt[:200]}\n\n📤 Rewritten:\n{result[:500]}",
-            reply_markup=KB([B("⚙️ Style",f"ai_{cid}"),B("🏠 Home","main")])
-        )
+            f"🧪 Style Test\nStyles: {', '.join(sorted(active)) or 'None'}{para_note}\n\n📥 Original:\n{txt[:200]}\n\n📤 Styled:",
+            reply_markup=KB([B("⚙️ Style",f"ai_{cid}"),B("🏠 Home","main")]))
+        pm='HTML' if use_html else None
+        try: await update.message.reply_text(styled[:1000],parse_mode=pm)
+        except: await update.message.reply_text(f"(preview err)\n{styled[:500]}")
+
+    elif st==ST_EMOJI:
+        cid=TEMP.get(uid,{}).get('cid')
+        await _dp(); await _du(); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
+        if cid:
+            ch_upd(cid,emoji_str=txt.strip(),emoji_pos='start')
+            await update.message.reply_text(f"✅ Emoji: {txt.strip()}\nPosition choose karo:",reply_markup=KB_AI(cid))
+        else: await update.message.reply_text("❌ Error.")
 
     elif st==ST_BC:
         if uid not in ADMIN_IDS: return
@@ -2210,42 +1674,41 @@ async def msg_hdl(update: Update, ctx):
         ctx.user_data.pop('st',None); sent=0
         for u in targets:
             try:
-                await ctx.bot.send_message(u['uid'],
-                    f"📢  {BOT_NAME}\n━━━━━━━━━━━━━━━\n{txt}\n━━━━━━━━━━━━━━━\n{ADMIN_USERNAME}")
+                await ctx.bot.send_message(u['uid'],f"📢  {BOT_NAME}\n━━━━━━━━━\n{txt}\n━━━━━━━━━\n{ADMIN_USERNAME}")
                 sent+=1; await asyncio.sleep(0.05)
             except: pass
-        await update.message.reply_text(f"✅ Broadcast: {sent}/{len(targets)} sent!",reply_markup=KB_ADM())
+        await update.message.reply_text(f"✅ Broadcast: {sent}/{len(targets)}",reply_markup=KB_ADM())
 
     elif st==ST_GID:
         if uid not in ADMIN_IDS: return
         try:
             tid=int(txt); act=ctx.user_data.get('sa','give')
             if act in ('revoke','ban','unban'):
-                if act=='revoke': u_revoke(tid); msg2="❌ Your subscription has been revoked."; ok=f"✅ Revoked: {tid}"
-                elif act=='ban': u_ban(tid,True); await eng_stop(tid); msg2="🚫 You have been banned from the bot."; ok=f"🚫 Banned: {tid}"
-                else: u_ban(tid,False); msg2=f"✅ You have been unbanned! /start to login."; ok=f"✅ Unbanned: {tid}"
+                if act=='revoke': u_revoke(tid); msg2="❌ Sub revoked."; ok=f"✅ Revoked: {tid}"
+                elif act=='ban':  u_ban(tid,True); await eng_stop(tid); msg2="🚫 Banned."; ok=f"🚫 Banned: {tid}"
+                else: u_ban(tid,False); msg2="✅ Unbanned! /start"; ok=f"✅ Unbanned: {tid}"
                 try: await ctx.bot.send_message(tid,msg2)
                 except: pass
-                await update.message.reply_text(ok,reply_markup=KB_ADM())
-                ctx.user_data.pop('st',None)
+                await update.message.reply_text(ok,reply_markup=KB_ADM()); ctx.user_data.pop('st',None)
             else:
                 TEMP[uid]={'tid':tid}; ctx.user_data['st']=ST_GDY
-                await update.message.reply_text(f"User: {tid}\nKitne din ki sub deni hai?")
-        except: await update.message.reply_text("❌ Valid User ID bhejo!")
+                plans=plan_all()
+                pi="\n".join([f"  {p['key']} = {p['label']} ({p['days']}d, {'∞' if p.get('max_channels',0)==0 else p['max_channels']} ch)" for p in plans if p['enabled']])
+                await update.message.reply_text(f"User: {tid}\nDays bhejo:\n\nPlans:\n{pi}\n\n(e.g. '30' or '30 m')")
+        except: await update.message.reply_text("❌ Valid User ID!")
 
     elif st==ST_GDY:
         if uid not in ADMIN_IDS: return
         try:
-            days=int(txt); tid=TEMP.get(uid,{}).get('tid')
-            u_give(tid,days)
-            try: await ctx.bot.send_message(tid,
-                f"🎉  Subscription Activated!\n\n"
-                f"✅  {days} Days Plan\n"
-                f"⚡  Enjoy {BOT_NAME} Pro!\n\n"
-                f"Support: {ADMIN_USERNAME}")
+            parts=txt.strip().split(); days=int(parts[0]); pk=parts[1] if len(parts)>1 else None
+            tid=TEMP.get(uid,{}).get('tid'); u_give(tid,days)
+            if pk:
+                p=plan_get(pk)
+                if p: u_set_plan(tid,pk)
+            try: await ctx.bot.send_message(tid,f"🎉 Subscription!\n\n✅ {days} Days\n⚡ {BOT_NAME} Pro!\n\nSupport: {ADMIN_USERNAME}")
             except: pass
-            await update.message.reply_text(f"✅ {days} days → {tid}",reply_markup=KB_ADM())
-        except: await update.message.reply_text("❌ Number bhejo!")
+            await update.message.reply_text(f"✅ {days} days → {tid}"+(f"\nPlan: {pk}" if pk else ""),reply_markup=KB_ADM())
+        except: await update.message.reply_text("❌ Format: '30' or '30 m'")
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
 
     elif st==ST_SRCH:
@@ -2254,171 +1717,104 @@ async def msg_hdl(update: Update, ctx):
         try:
             tid=int(txt); u=u_get(tid)
             if u:
-                chs=ch_all(tid); tf,td,_=l_stats(tid)
+                chs=ch_all(tid); tf,td,_=l_stats(tid); cur,mx=u_channel_limit(tid)
                 await update.message.reply_text(
-                    f"👤 User Found\n\n"
-                    f"Name : {u.get('name','?')}\n"
-                    f"ID   : `{u['uid']}`\n"
-                    f"Sub  : {u_sub_str(tid)}\n"
-                    f"Chs  : {len(chs)}\n"
-                    f"Fwd  : {tf}  (Today: {td})\n"
-                    f"Ban  : {'Yes' if u['is_banned'] else 'No'}",
-                    reply_markup=IM([
-                        [B("✅ Give Sub",f"a_give"),    B("❌ Revoke",f"a_revoke")],
-                        [B("🚫 Ban",f"a_ban"),          B("✅ Unban",f"a_unban")],
-                        [B("‹ Back","adm")],
-                    ])
-                )
-            else: await update.message.reply_text("❌ User not found.",reply_markup=KB_ADM())
-        except: await update.message.reply_text("❌ Valid User ID bhejo!",reply_markup=KB_ADM())
+                    f"👤 Found\n\nName: {u.get('name','?')}\nID: `{u['uid']}`\nSub: {u_sub_str(tid)}\n"
+                    f"Channels: {len(chs)} (max: {'∞' if mx==0 else mx})\nFwd: {tf} (Today: {td})\nBanned: {'Yes' if u['is_banned'] else 'No'}",
+                    reply_markup=IM([[B("✅ Give","a_give"),B("❌ Revoke","a_revoke")],
+                                     [B("🚫 Ban","a_ban"),B("✅ Unban","a_unban")],[B("‹ Back","adm")]]))
+            else: await update.message.reply_text("❌ Not found.",reply_markup=KB_ADM())
+        except: await update.message.reply_text("❌ Valid User ID!",reply_markup=KB_ADM())
 
-    # ── PLAN EDITING STATES ──────────────────────────────────────
     elif st==ST_TRIAL:
         if uid not in ADMIN_IDS: return
         ctx.user_data.pop('st',None)
         try:
-            days = max(0, int(txt))
-            setting_set('trial_days', days)
-            await update.message.reply_text(
-                f"✅ Trial updated: {days} days",
-                reply_markup=KB([B("💳 Plans","a_plans"), B("‹ Admin","adm")])
-            )
-        except:
-            await update.message.reply_text("❌ Number bhejo! e.g. 7")
-
-    elif st==ST_EMOJI:
-        cid = TEMP.get(uid,{}).get('cid')
-        await _del_prompt(); await _del_user()
-        ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        if cid:
-            ch_upd(cid, emoji_str=txt.strip(), emoji_pos='start')
-            await update.message.reply_text(
-                f"✅ Emoji set: {txt.strip()}\n\nAb position choose karo:",
-                reply_markup=KB_AI(cid)
-            )
-        else:
-            await update.message.reply_text("❌ Error, try again.")
+            days=max(0,int(txt)); setting_set('trial_days',days)
+            await update.message.reply_text(f"✅ Trial: {days} days",reply_markup=KB([B("💳 Plans","a_plans"),B("‹","adm")]))
+        except: await update.message.reply_text("❌ Number!")
 
     elif st==ST_PLAN_PRICE:
         if uid not in ADMIN_IDS: return
-        pk = TEMP.get(uid,{}).get('plan_key')
+        pk=TEMP.get(uid,{}).get('plan_key')
         try:
-            price = max(0, int(txt))
-            TEMP.setdefault(uid,{})['new_price'] = price
-            TEMP[uid]['step'] = 'days'
-            ctx.user_data['st'] = ST_PLAN_DAYS
-            p = plan_get(pk)
-            await update.message.reply_text(
-                f"✅ Price: ₹{price}\n\n"
-                f"Ab DAYS bhejo (current: {p['days']}):\n\n/cancel"
-            )
-        except:
-            await update.message.reply_text("❌ Valid price bhejo! e.g. 49")
+            price=max(0,int(txt)); TEMP.setdefault(uid,{})['new_price']=price
+            ctx.user_data['st']=ST_PLAN_DAYS; p=plan_get(pk)
+            await update.message.reply_text(f"✅ Price: ₹{price}\n\nDays bhejo (current: {p['days']}):\n\n/cancel")
+        except: await update.message.reply_text("❌ Valid price!")
 
     elif st==ST_PLAN_DAYS:
         if uid not in ADMIN_IDS: return
-        pk = TEMP.get(uid,{}).get('plan_key')
-        new_price = TEMP.get(uid,{}).get('new_price')
+        try:
+            days=max(1,int(txt)); TEMP.setdefault(uid,{})['new_days']=days
+            ctx.user_data['st']=ST_PLAN_MAXCH; pk=TEMP.get(uid,{}).get('plan_key'); p=plan_get(pk); mc=p.get('max_channels',0)
+            await update.message.reply_text(f"✅ Days: {days}\n\nMax Channels:\n(Current: {'∞' if mc==0 else mc})\n0=unlimited\n\n/cancel")
+        except: await update.message.reply_text("❌ Valid days!")
+
+    elif st==ST_PLAN_MAXCH:
+        if uid not in ADMIN_IDS: return
+        pk=TEMP.get(uid,{}).get('plan_key'); np=TEMP.get(uid,{}).get('new_price'); nd=TEMP.get(uid,{}).get('new_days')
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
         try:
-            days = max(1, int(txt))
-            plan_upd(pk, price=new_price, days=days)
-            p = plan_get(pk)
+            mc=max(0,int(txt)); plan_upd(pk,price=np,days=nd,max_channels=mc)
+            p=plan_get(pk)
             await update.message.reply_text(
-                f"✅ Plan Updated!\n\n"
-                f"Plan : {p['label']}\n"
-                f"Price: ₹{new_price}\n"
-                f"Days : {days}",
-                reply_markup=KB([B("💳 Plans","a_plans"), B("‹ Admin","adm")])
-            )
-        except:
-            await update.message.reply_text("❌ Valid days bhejo! e.g. 30")
+                f"✅ Plan Updated!\n\n{p['label']}\n₹{np} | {nd}d | {'∞' if mc==0 else mc} ch",
+                reply_markup=KB([B("💳 Plans","a_plans"),B("‹","adm")]))
+        except: await update.message.reply_text("❌ Number! (0=unlimited)")
 
     elif st==ST_PLAN_NEW:
         if uid not in ADMIN_IDS: return
         ctx.user_data.pop('st',None); TEMP.pop(uid,None)
         try:
-            parts = txt.split(',')
-            if len(parts) != 3: raise ValueError
-            label = parts[0].strip()
-            days  = max(1, int(parts[1].strip()))
-            price = max(0, int(parts[2].strip()))
-            # Generate unique key
-            import hashlib
-            key = hashlib.md5(label.encode()).hexdigest()[:4]
-            plan_add(key, label, days, price)
+            parts=txt.split(',')
+            if len(parts)<3: raise ValueError
+            label=parts[0].strip(); days=max(1,int(parts[1].strip())); price=max(0,int(parts[2].strip()))
+            mc=max(0,int(parts[3].strip())) if len(parts)>3 else 0
+            import hashlib; key=hashlib.md5(label.encode()).hexdigest()[:4]
+            plan_add(key,label,days,price,mc)
             await update.message.reply_text(
-                f"✅ New Plan Added!\n\n"
-                f"Plan : {label}\n"
-                f"Days : {days}\n"
-                f"Price: ₹{price}",
-                reply_markup=KB([B("💳 Plans","a_plans"), B("‹ Admin","adm")])
-            )
-        except:
-            await update.message.reply_text(
-                "❌ Format galat hai!\n\n"
-                "Sahi format:\nLABEL,DAYS,PRICE\n\n"
-                "Example:\n💎 Premium,90,149"
-            )
+                f"✅ Plan Added!\n\n{label}\n₹{price} | {days}d | {'∞' if mc==0 else mc} ch",
+                reply_markup=KB([B("💳 Plans","a_plans"),B("‹","adm")]))
+        except: await update.message.reply_text("❌ Format: LABEL,DAYS,PRICE,MAX_CH\nExample: 💎 Pro,90,149,5")
 
 # ═══════════════════════════════════════════════════════════════
 #   MAIN
 # ═══════════════════════════════════════════════════════════════
 async def post_init(app):
     db_init()
-
-    # ✅ Load ALL sessions into RAM immediately — before any user interaction
     try:
-        c = DB()
-        rows = c.execute("SELECT uid, sess FROM sessions").fetchall()
-        c.close()
+        c=DB(); rows=c.execute("SELECT uid,sess FROM sessions").fetchall(); c.close()
         for row in rows:
-            if row['sess']:
-                SESSION_CACHE[int(row['uid'])] = row['sess']
-                KNOWN_USERS.add(int(row['uid']))  # mark as known
-        LOG.info(f"✅ {len(SESSION_CACHE)} sessions loaded into cache")
-    except Exception as e:
-        LOG.error(f"Session preload failed: {e}")
-
+            if row['sess']: SESSION_CACHE[int(row['uid'])]=row['sess']; KNOWN_USERS.add(int(row['uid']))
+        LOG.info(f"✅ {len(SESSION_CACHE)} sessions loaded")
+    except Exception as e: LOG.error(f"Session preload:{e}")
     await app.bot.set_my_commands([
-        BotCommand("start",  "Open bot"),
-        BotCommand("menu",   "Dashboard"),
-        BotCommand("admin",  "Admin panel"),
-        BotCommand("cancel", "Cancel"),
+        BotCommand("start","Open bot"),BotCommand("menu","Dashboard"),
+        BotCommand("admin","Admin panel"),BotCommand("cancel","Cancel"),
     ])
-
-    # Start engines after sessions are loaded
-    async def _start_engines():
-        await asyncio.sleep(1)
-        await eng_restart_all()
-
-    asyncio.create_task(_start_engines())
+    async def _start():
+        await asyncio.sleep(1); await eng_restart_all()
+    asyncio.create_task(_start())
     LOG.info(f"✅ {BOT_NAME} {BOT_VERSION} Ready!")
 
 def main():
     from telegram.request import HTTPXRequest
-    request = HTTPXRequest(
-        read_timeout=10,
-        write_timeout=10,
-        connect_timeout=10,
-        pool_timeout=3,
-    )
-    app = Application.builder().token(BOT_TOKEN).request(request).post_init(post_init).concurrent_updates(True).build()
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("menu",   cmd_menu))
-    app.add_handler(CommandHandler("admin",  cmd_admin))
-    app.add_handler(CommandHandler("cancel", cmd_cancel))
+    req=HTTPXRequest(read_timeout=10,write_timeout=10,connect_timeout=10,pool_timeout=3)
+    app=(Application.builder().token(BOT_TOKEN).request(req).post_init(post_init).concurrent_updates(True).build())
+    app.add_handler(CommandHandler("start",cmd_start))
+    app.add_handler(CommandHandler("menu",cmd_menu))
+    app.add_handler(CommandHandler("admin",cmd_admin))
+    app.add_handler(CommandHandler("cancel",cmd_cancel))
     app.add_handler(CallbackQueryHandler(cbk))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_hdl))
-    print(f"\n{'═'*55}")
-    print(f"  🚀  {BOT_NAME}  {BOT_VERSION}  —  Final Edition")
-    print(f"  QR Timer | Auto Channels | Admin No-Login")
+    app.add_handler(MessageHandler(tg_filters.TEXT & ~tg_filters.COMMAND,msg_hdl))
+    print(f"\n{'═'*58}")
+    print(f"  🚀  {BOT_NAME}  {BOT_VERSION}")
+    print(f"  Individual Media Toggles | Para Block/Replace")
+    print(f"  Multi-Style | Plan Limits | Clean UI")
     print(f"  Admin: {ADMIN_USERNAME}")
-    print(f"{'═'*55}\n")
-    app.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-    )
+    print(f"{'═'*58}\n")
+    app.run_polling(drop_pending_updates=True,allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
