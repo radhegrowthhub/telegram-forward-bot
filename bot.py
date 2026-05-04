@@ -391,31 +391,97 @@ def para_process(text:str, ch_id:int) -> str|None:
 # ═══════════════════════════════════════════════════════════════
 #   CHAT CACHE
 # ═══════════════════════════════════════════════════════════════
-CHAT_CACHE:dict={}
+# ── Separate caches: source (all) vs destination (admin only) ──
+SRC_CACHE:dict={}   # uid -> list of ALL channels user is in
+DEST_CACHE:dict={}  # uid -> list of channels where user can send/post
+CHAT_CACHE:dict={}  # alias kept for logout cleanup
+
+def _make_sid(e)->str:
+    sid=str(e.id)
+    if not sid.startswith('-'): sid=f"-100{sid}"
+    return sid
+
+def _can_post(e)->bool:
+    """
+    Returns True if user can send/forward to this entity.
+    Broadcast Channel  → must be creator OR have post_messages admin right
+    Group / Megagroup  → member is enough (default_banned_rights.send_messages=False)
+    """
+    is_broadcast=getattr(e,'broadcast',False)
+    is_mega=getattr(e,'megagroup',False)
+
+    if isinstance(e,Chat):
+        # Normal group — member can always send (unless left/kicked, won't appear in dialogs)
+        return True
+
+    if isinstance(e,Channel):
+        # Creator always can post
+        if getattr(e,'creator',False): return True
+
+        admin_rights=getattr(e,'admin_rights',None)
+
+        if is_broadcast and not is_mega:
+            # Broadcast channel: MUST be admin with post_messages
+            if admin_rights is None: return False
+            return bool(getattr(admin_rights,'post_messages',False))
+
+        # Megagroup / supergroup
+        if admin_rights:
+            # Admin — can always send
+            return True
+        # Regular member — check if send_messages is banned by default
+        dbr=getattr(e,'default_banned_rights',None)
+        if dbr and getattr(dbr,'send_messages',False):
+            return False   # everyone is restricted
+        return True
+
+    return False
 
 async def fetch_chats(uid:int)->list:
+    """Fetch ALL channels (for source picker). Returns full list."""
     client=ACL.get(uid); sess=s_get(uid)
     if not client and not sess: return []
     own=False
     if not client:
-        client=TelegramClient(StringSession(sess),API_ID,API_HASH); await client.connect(); own=True
-    chats=[]
+        client=TelegramClient(StringSession(sess),API_ID,API_HASH)
+        await client.connect(); own=True
+    src_list=[]; dest_list=[]
     try:
-        dialogs=await client.get_dialogs(limit=300)
+        dialogs=await client.get_dialogs(limit=500)
         for d in dialogs:
             e=d.entity
-            if isinstance(e,(Channel,Chat)):
-                icon="📢" if getattr(e,'broadcast',False) else "👥"
-                sid=str(e.id)
-                if not sid.startswith('-'): sid=f"-100{sid}"
-                chats.append({'id':sid,'name':e.title or "Unknown",'icon':icon})
-        CHAT_CACHE[uid]=chats
-    except Exception as ex: LOG.error(f"fetch_chats {uid}: {ex}")
+            if not isinstance(e,(Channel,Chat)): continue
+            is_broadcast=getattr(e,'broadcast',False)
+            is_mega=getattr(e,'megagroup',False)
+            name=getattr(e,'title',None) or "Unknown"
+            sid=_make_sid(e)
+
+            # Icon
+            if is_broadcast and not is_mega: icon="📢"
+            elif is_mega:                    icon="💬"
+            else:                            icon="👥"
+
+            entry={'id':sid,'name':name,'icon':icon}
+            src_list.append(entry)
+            if _can_post(e):
+                dest_list.append(entry)
+
+        SRC_CACHE[uid]=src_list
+        DEST_CACHE[uid]=dest_list
+        CHAT_CACHE[uid]=src_list  # backward compat
+        LOG.info(f"✅ Fetched uid={uid}: {len(src_list)} total, {len(dest_list)} dest-capable")
+    except Exception as ex:
+        LOG.error(f"fetch_chats {uid}: {ex}")
     finally:
         if own:
             try: await client.disconnect()
             except: pass
-    return chats
+    return src_list
+
+async def fetch_chats_dest(uid:int)->list:
+    """Force refresh destination list only (fast re-check)."""
+    await fetch_chats(uid)
+    return DEST_CACHE.get(uid,[])
 
 def chat_list_text(chats,page=0):
     start=page*CHATS_PER_PAGE; end=start+CHATS_PER_PAGE; pc=chats[start:end]
@@ -549,6 +615,9 @@ def strip_links(text,b_all,b_www,b_tme,b_at):
 #   ENGINE
 # ═══════════════════════════════════════════════════════════════
 ACL:dict={}; TSK:dict={}; REPLY_MAP:dict={}
+
+# Menu message tracker — last bot menu msg per user {uid: Message}
+MENU_MSG:dict={}
 
 async def _fwd(cl,msg,did,ch,repls,reply_to_msg_id=None):
     try:
@@ -746,6 +815,39 @@ async def eng_restart_all():
 def B(t,c): return IB(t,callback_data=c)
 def KB(*rows): return IM(list(rows))
 def OO(v): return "🟢" if v else "🔴"
+
+# ── Message cleanup helpers ─────────────────────────────────────
+async def _safe_delete(msg):
+    if msg is None: return
+    try: await msg.delete()
+    except: pass
+
+async def clean_send(chat_obj, uid:int, text:str, kb=None):
+    """Delete previous menu msg, send new, track it."""
+    old=MENU_MSG.pop(uid,None)
+    await _safe_delete(old)
+    try:
+        msg=await chat_obj.reply_text(text,reply_markup=kb)
+        MENU_MSG[uid]=msg; return msg
+    except Exception as e:
+        LOG.warning(f"clean_send uid={uid}: {e}"); return None
+
+async def clean_edit(q, uid:int, text:str, kb=None):
+    """Edit in-place or delete+resend. Always tracks result in MENU_MSG."""
+    try:
+        await q.edit_message_text(text,reply_markup=kb)
+        MENU_MSG[uid]=q.message; return
+    except: pass
+    # Edit failed — delete old, send fresh
+    old=MENU_MSG.pop(uid,None)
+    await _safe_delete(old)
+    try: await _safe_delete(q.message)
+    except: pass
+    try:
+        msg=await q.message.reply_text(text,reply_markup=kb)
+        MENU_MSG[uid]=msg
+    except Exception as e:
+        LOG.warning(f"clean_edit uid={uid}: {e}")
 
 def KB_MAIN(uid):
     eng=uid in ACL; on=u_bot_on(uid)
@@ -1041,21 +1143,24 @@ async def do_qr(update:Update,ctx):
     msg=update.callback_query.message if update.callback_query else update.message
     if s_get(uid):
         if uid not in ACL: asyncio.create_task(eng_start(uid))
-        try: await msg.reply_text(f"✅ Already logged in!\n{u_sub_str(uid)}",reply_markup=KB_MAIN(uid))
-        except:
-            if update.callback_query:
-                await update.callback_query.edit_message_text(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",reply_markup=KB_MAIN(uid))
+        # Already logged in — clean edit/send main menu
+        if update.callback_query:
+            await clean_edit(update.callback_query,uid,f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",KB_MAIN(uid))
+        else:
+            await clean_send(msg,uid,f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",KB_MAIN(uid))
         return
-    old=QR_CL.pop(uid,None)
-    if old:
-        try: await old.disconnect()
+    old_cl=QR_CL.pop(uid,None)
+    if old_cl:
+        try: await old_cl.disconnect()
         except: pass
     cl=TelegramClient(StringSession(),API_ID,API_HASH)
     await cl.connect(); QR_CL[uid]=cl; fp=f"qr_{uid}.png"
+    # Delete any old menu message before starting QR flow
+    await _safe_delete(MENU_MSG.pop(uid,None))
     prog=await msg.reply_text("⏳ Generating QR code...")
     try:
         qr=await cl.qr_login(); qrcode.make(qr.url).save(fp)
-        await prog.delete()
+        await _safe_delete(prog)
         qrmsg=await msg.reply_photo(open(fp,"rb"),
             caption=f"📱 {BOT_NAME} Login\n\n1️⃣ Open Telegram\n2️⃣ Settings → Devices\n3️⃣ Link Device → Scan\n\n⏳ Expires: 30s")
         if os.path.exists(fp): os.remove(fp)
@@ -1065,30 +1170,31 @@ async def do_qr(update:Update,ctx):
         try: await asyncio.wait_for(qr.wait(),timeout=QR_TIMEOUT)
         except asyncio.TimeoutError:
             timer_task.cancel()
-            try: await timer_msg.delete()
-            except: pass
-            try: await qrmsg.delete()
-            except: pass
-            await msg.reply_text("⏰ QR Expired!",reply_markup=KB([B("🔄 Try Again","qr_login")]))
+            await _safe_delete(timer_msg); await _safe_delete(qrmsg)
+            # Show expired notice as clean menu
+            expired=await msg.reply_text("⏰ QR Expired! Tap below to try again.",reply_markup=KB([B("🔄 Try Again","qr_login")]))
+            MENU_MSG[uid]=expired
             try: await cl.disconnect()
             except: pass
             return
         timer_task.cancel()
-        try: await timer_msg.delete()
-        except: pass
+        # ── Login SUCCESS — delete ALL QR messages, show clean menu ──
+        await _safe_delete(timer_msg)
+        await _safe_delete(qrmsg)
         sess=cl.session.save(); s_save(uid,sess); SESSION_CACHE[uid]=sess; KNOWN_USERS.add(uid)
         is_new=u_upsert(uid,update.effective_user.username or "",update.effective_user.first_name or "")
         me=await cl.get_me(); nm=me.first_name or ""; un=f"@{me.username}" if me.username else str(me.id)
         ACL[uid]=cl
-        try: await qrmsg.delete()
-        except: pass
-        await msg.reply_text(
-            f"✅ Login Successful!\n\n👤 {nm}  ({un})\n"
-            f"{'🎁 Free Trial: '+str(get_trial_days())+' days!' if is_new else '💳 '+u_sub_str(uid)}",
+        greet="🎁 Free Trial: "+str(get_trial_days())+" days!" if is_new else "💳 "+u_sub_str(uid)
+        menu=await msg.reply_text(
+            f"✅ Login Successful!\n👤 {nm}  ({un})\n{greet}",
             reply_markup=KB_MAIN(uid))
+        MENU_MSG[uid]=menu
         asyncio.create_task(eng_start(uid)); asyncio.create_task(fetch_chats(uid))
     except Exception as e:
-        LOG.error(f"QR:{e}"); await msg.reply_text(f"❌ Error: {e}")
+        LOG.error(f"QR:{e}")
+        err=await msg.reply_text(f"❌ Error: {e}\n\n/start karo")
+        MENU_MSG[uid]=err
         try: await cl.disconnect()
         except: pass
     finally:
@@ -1108,19 +1214,58 @@ async def _qr_countdown(timer_msg,start_time,total):
 #   CHANNEL PICKER
 # ═══════════════════════════════════════════════════════════════
 async def show_picker(uid,mode,page,edit_target,cid_dest=None):
-    chats=CHAT_CACHE.get(uid,[])
-    if not chats: chats=await fetch_chats(uid)
+    if mode=='src':
+        # Source: ALL channels user is member of
+        chats=SRC_CACHE.get(uid,[])
+        if not chats:
+            chats=await fetch_chats(uid)
+            chats=SRC_CACHE.get(uid,[])
+        hdr=(
+            "📡  Select SOURCE Channel\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 All channels/groups shown\n\n"
+        )
+        prefix="ps"
+        empty_msg="❌ Koi channel nahi mila!\n\nKisi channel/group ko join karo pehle."
+    else:
+        # Destination: ONLY channels/groups where user is admin or can post
+        chats=DEST_CACHE.get(uid,[])
+        if not chats:
+            chats=await fetch_chats(uid)
+            chats=DEST_CACHE.get(uid,[])
+        hdr=(
+            "📤  Select DESTINATION Channel\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "✅ Sirf wahi channels jahan\n"
+            "   aapko Admin access hai\n\n"
+        )
+        prefix=f"pd_{cid_dest}"
+        empty_msg=(
+            "❌ Koi destination nahi mili!\n\n"
+            "Destination ke liye:\n"
+            "• Broadcast channel mein Admin bano\n"
+            "• Ya kisi group mein message bhejne\n"
+            "  ka permission lo\n\n"
+            "Phir 🔄 Refresh karo."
+        )
+
     if not chats:
-        try: await edit_target.edit_text("❌ No channels found!")
-        except: await edit_target.reply_text("❌ No channels found!")
+        try: await edit_target.edit_text(empty_msg,reply_markup=IM([[IB("🔄 Refresh",callback_data=f"refr_{'ps' if mode=='src' else f'pd_{cid_dest}'}")]]))
+        except: await edit_target.reply_text(empty_msg)
         return
+
     total=len(chats); list_txt,_=chat_list_text(chats,page)
-    if mode=='src': hdr="📡  Select SOURCE Channel\n━━━━━━━━━━━━━━━━━━━━\n\n"; prefix="ps"
-    else:           hdr="📤  Select DESTINATION Channel\n━━━━━━━━━━━━━━━━━━━━\n\n"; prefix=f"pd_{cid_dest}"
-    txt=hdr+list_txt+f"\n━━━━━━━━━━━━━━━━━━━━\n📋 Total: {total} channels"
+    txt=hdr+list_txt+f"\n━━━━━━━━━━━━━━━━━━━━\n📋 Total: {total}"
     kb=num_kb(chats,page,prefix,total)
-    try: await edit_target.edit_text(txt,reply_markup=kb)
-    except: await edit_target.reply_text(txt,reply_markup=kb)
+    try:
+        await edit_target.edit_text(txt,reply_markup=kb)
+        MENU_MSG[uid]=edit_target
+    except:
+        await _safe_delete(MENU_MSG.pop(uid,None))
+        try:
+            sent=await edit_target.reply_text(txt,reply_markup=kb)
+            MENU_MSG[uid]=sent
+        except: pass
 
 # ═══════════════════════════════════════════════════════════════
 #   STATE
@@ -1135,35 +1280,49 @@ TEMP:dict={}
 # ═══════════════════════════════════════════════════════════════
 #   COMMANDS
 # ═══════════════════════════════════════════════════════════════
+async def _delete_cmd(u):
+    """Delete the user's command message silently."""
+    try: await u.message.delete()
+    except: pass
+
 async def cmd_start(u:Update,ctx):
     uid=u.effective_user.id
-    if uid in ADMIN_IDS: await u.message.reply_text("🔧 Admin Panel",reply_markup=KB_ADM()); return
+    await _delete_cmd(u)  # delete /start command message
     sess=s_get(uid)
+    if uid in ADMIN_IDS:
+        await clean_send(u.message,uid,"🔧 Admin Panel",KB_ADM()); return
     if sess or uid in ACL:
         if sess and uid not in SESSION_CACHE: SESSION_CACHE[uid]=sess
         if sess and uid not in ACL: asyncio.create_task(eng_start(uid))
         u_upsert(uid,u.effective_user.username or "",u.effective_user.first_name or "")
-        await u.message.reply_text(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",reply_markup=KB_MAIN(uid)); return
-    await u.message.reply_text(
+        await clean_send(u.message,uid,f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",KB_MAIN(uid)); return
+    await clean_send(u.message,uid,
         f"⚡ {BOT_NAME} — Pro Forwarder\n\n📡 Auto channel detect\n"
         f"📹 Media control • ✂️ Filters\n📝 Para block/replace\n"
         f"🎁 {get_trial_days()} days free trial\n\nAdmin: {ADMIN_USERNAME}\n\n👇 Login — No OTP!",
-        reply_markup=KB([B("📱 Login with QR Code","qr_login")]))
+        KB([B("📱 Login with QR Code","qr_login")]))
 
 async def cmd_menu(u:Update,ctx):
     uid=u.effective_user.id
-    if uid in ADMIN_IDS: await u.message.reply_text("🔧 Admin Panel",reply_markup=KB_ADM()); return
-    if not s_get(uid): await u.message.reply_text("Pehle /start karo!"); return
-    await u.message.reply_text(f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",reply_markup=KB_MAIN(uid))
+    await _delete_cmd(u)
+    if uid in ADMIN_IDS:
+        await clean_send(u.message,uid,"🔧 Admin Panel",KB_ADM()); return
+    if not s_get(uid):
+        await clean_send(u.message,uid,"❌ Pehle /start karo!"); return
+    await clean_send(u.message,uid,f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}",KB_MAIN(uid))
 
 async def cmd_admin(u:Update,ctx):
     if u.effective_user.id not in ADMIN_IDS: return
-    await u.message.reply_text("🔧 Admin Panel",reply_markup=KB_ADM())
+    await _delete_cmd(u)
+    await clean_send(u.message,u.effective_user.id,"🔧 Admin Panel",KB_ADM())
 
 async def cmd_cancel(u:Update,ctx):
     uid=u.effective_user.id; ctx.user_data.clear(); TEMP.pop(uid,None)
-    await u.message.reply_text("❌ Cancelled.",
-        reply_markup=KB_ADM() if uid in ADMIN_IDS else (KB_MAIN(uid) if s_get(uid) else None))
+    await _delete_cmd(u)
+    kb=KB_ADM() if uid in ADMIN_IDS else (KB_MAIN(uid) if s_get(uid) else None)
+    if kb:
+        txt="🔧 Admin Panel" if uid in ADMIN_IDS else f"⚡ {BOT_NAME}  •  {u_sub_str(uid)}"
+        await clean_send(u.message,uid,txt,kb)
 
 # ═══════════════════════════════════════════════════════════════
 #   CALLBACK
@@ -1173,10 +1332,8 @@ async def cbk(update:Update,ctx):
     d=q.data; uid=update.effective_user.id
 
     async def ED(txt,kb=None):
-        try: await q.edit_message_text(txt,reply_markup=kb)
-        except:
-            try: await q.message.reply_text(txt,reply_markup=kb)
-            except: pass
+        # Use clean_edit: edits in-place, falls back to delete+resend
+        await clean_edit(q,uid,txt,kb)
     async def ANS(m,alert=False):
         try: await q.answer(m,show_alert=alert)
         except: pass
@@ -1196,10 +1353,7 @@ async def cbk(update:Update,ctx):
                 if r and r['sess']: SESSION_CACHE[uid]=r['sess']; KNOWN_USERS.add(uid); has_sess=True
             except: pass
         if not has_sess:
-            try: await q.edit_message_text(f"⚡ {BOT_NAME}\n\nLogin karo:",reply_markup=KB([B("📱 Login with QR Code","qr_login")]))
-            except:
-                try: await q.message.reply_text(f"⚡ {BOT_NAME}\n\nLogin karo:",reply_markup=KB([B("📱 Login with QR Code","qr_login")]))
-                except: pass
+            await clean_edit(q,uid,f"⚡ {BOT_NAME}\n\nLogin karo:",KB([B("📱 Login with QR Code","qr_login")]))
             return
         if uid not in ACL: asyncio.create_task(eng_start(uid))
 
@@ -1215,7 +1369,9 @@ async def cbk(update:Update,ctx):
         await eng_stop(uid); ok=await eng_start(uid)
         await ANS("✅ Engine Restarted!" if ok else "❌ Error!",True); await ED("⚙️ Settings",KB_SETTINGS(uid))
     elif d=="logout":
-        await eng_stop(uid); s_del(uid); CHAT_CACHE.pop(uid,None); await ED("🚪 Logged out!\n/start se login karo.")
+        await eng_stop(uid); s_del(uid)
+        SRC_CACHE.pop(uid,None); DEST_CACHE.pop(uid,None); CHAT_CACHE.pop(uid,None)
+        await ED("🚪 Logged out!\n/start se login karo.")
     elif d=="support":
         await ED(f"🆘 Support\n\nAdmin: {ADMIN_USERNAME}\n\nYour ID: `{uid}`",KB([B(f"💬 Contact {ADMIN_USERNAME}","noop"),B("‹ Back","main")]))
 
@@ -1225,11 +1381,12 @@ async def cbk(update:Update,ctx):
         if not u_ok(uid): await ANS("❌ Subscription needed!",True); return
         can,msg2=u_can_add_channel(uid)
         if not can: await ED(msg2,KB([B("💳 Upgrade Plan","sub"),B("‹ Back","chs")])); return
-        chats=CHAT_CACHE.get(uid,[])
+        chats=SRC_CACHE.get(uid,[])
         if not chats:
-            p=await q.message.reply_text("📡 Fetching channels..."); chats=await fetch_chats(uid)
-            try: await p.delete()
-            except: pass
+            await _safe_delete(MENU_MSG.pop(uid,None))
+            p=await q.message.reply_text("📡 Fetching all channels...")
+            await fetch_chats(uid)
+            await _safe_delete(p)
         await show_picker(uid,'src',0,q.message)
 
     elif d.startswith("ch_") and d[3:].isdigit():
@@ -1247,7 +1404,9 @@ async def cbk(update:Update,ctx):
         await ED(f"📡 {ch_get(cid)['ch_name']}",KB_CH(cid))
     elif d.startswith("ch_ren_"):
         cid=int(d[7:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_REN
-        await q.message.reply_text("✏️ New name bhejo:\n\n/cancel")
+        await _safe_delete(MENU_MSG.pop(uid,None))
+        p=await q.message.reply_text("✏️ New name bhejo:\n\n/cancel")
+        TEMP[uid]['prompt_id']=p.message_id
     elif d.startswith("ch_stat_"):
         cid=int(d[8:]); ch=ch_get(cid)
         c=DB()
@@ -1311,22 +1470,28 @@ async def cbk(update:Update,ctx):
     elif d.startswith("pg_"):
         parts=d.split("_"); page=int(parts[-1])
         if "ps" in d: await show_picker(uid,'src',page,q.message)
-        elif "pd_" in d: cid=int(parts[2]); await show_picker(uid,'dest',page,q.message,cid)
+        elif "pd_" in d:
+            # pg_pd_{cid}_{page}
+            cid=int(parts[2]); await show_picker(uid,'dest',page,q.message,cid)
     elif d.startswith("refr_"):
-        p=await q.message.reply_text("🔄 Refreshing..."); await fetch_chats(uid)
-        try: await p.delete()
-        except: pass
-        if "ps" in d: await show_picker(uid,'src',0,q.message)
-        else: cid=TEMP.get(uid,{}).get('cid'); await show_picker(uid,'dest',0,q.message,cid)
+        await _safe_delete(MENU_MSG.pop(uid,None))
+        p=await q.message.reply_text("🔄 Refreshing channels...")
+        await fetch_chats(uid)
+        await _safe_delete(p)
+        if "ps" in d:
+            await show_picker(uid,'src',0,q.message)
+        else:
+            cid=TEMP.get(uid,{}).get('cid')
+            await show_picker(uid,'dest',0,q.message,cid)
     elif d.startswith("ps_"):
-        idx=int(d[3:]); chats=CHAT_CACHE.get(uid,[])
+        idx=int(d[3:]); chats=SRC_CACHE.get(uid,[])
         if idx>=len(chats): await ANS("❌ Invalid!"); return
         chat=chats[idx]; cid=ch_add(uid,chat['id'],chat['name'],chat['name'][:25])
         asyncio.create_task(eng_start(uid)); TEMP[uid]={'cid':cid}
         await show_picker(uid,'dest',0,q.message,cid)
     elif d.startswith("pd_"):
         parts=d.split("_"); cid=int(parts[1]); idx=int(parts[2])
-        chats=CHAT_CACHE.get(uid,[])
+        chats=DEST_CACHE.get(uid,[])
         if idx>=len(chats): await ANS("❌ Invalid!"); return
         chat=chats[idx]; ch_add_dest(cid,chat['id'],chat['name']); asyncio.create_task(eng_start(uid))
         ch=ch_get(cid)
@@ -1379,11 +1544,13 @@ async def cbk(update:Update,ctx):
     elif d.startswith("s_hdr_"):
         cid=int(d[6:]); ch=ch_get(cid); cur=ch.get('header','') or ''
         TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_HDR
+        await _safe_delete(MENU_MSG.pop(uid,None))
         m=await q.message.reply_text(f"📝 Header bhejo:\n{'Current: '+_short(cur,40) if cur else 'None'}\n\n(- = clear)\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("s_ftr_"):
         cid=int(d[6:]); ch=ch_get(cid); cur=ch.get('footer','') or ''
         TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_FTR
+        await _safe_delete(MENU_MSG.pop(uid,None))
         m=await q.message.reply_text(f"📝 Footer bhejo:\n{'Current: '+_short(cur,40) if cur else 'None'}\n\n(- = clear)\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
 
@@ -1439,6 +1606,7 @@ async def cbk(update:Update,ctx):
         m=await q.message.reply_text("📝 Purana word bhejo:\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("add_prp_"):
         cid=int(d[8:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_PRO
+        await _safe_delete(MENU_MSG.pop(uid,None))
         m=await q.message.reply_text("📋 Para Replace\n\nTrigger word bhejo:\n(Jis paragraph mein ye word ho)\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("d_rp_"): rp_del(int(d[5:])); await ANS("✅ Removed!")
@@ -1453,6 +1621,7 @@ async def cbk(update:Update,ctx):
         m=await q.message.reply_text("🚫 Blacklist word:\n\n/cancel"); TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("add_pb_"):
         cid=int(d[7:]); TEMP[uid]={'cid':cid,'ft':'para_block'}; ctx.user_data['st']=ST_PB
+        await _safe_delete(MENU_MSG.pop(uid,None))
         m=await q.message.reply_text(
             "📝 Para Block\n\nTrigger word bhejo:\nJis paragraph mein ye word hoga wo DELETE ho jaayega.\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
@@ -1573,7 +1742,8 @@ async def msg_hdl(update:Update,ctx):
     if st==ST_REN:
         cid=_cid(); ch_upd(cid,ch_name=txt[:30])
         await _dp(); await _du(); ctx.user_data.pop('st',None); TEMP.pop(uid,None)
-        await update.message.reply_text(f"✅ Renamed: {txt[:30]}",reply_markup=KB([B("‹ Back",f"ch_{cid or 0}")]))
+        msg=await update.message.reply_text(f"✅ Renamed: {txt[:30]}",reply_markup=KB([B("‹ Back",f"ch_{cid or 0}")]))
+        MENU_MSG[uid]=msg
 
     elif st==ST_LO:
         TEMP.setdefault(uid,{})['old']=txt; ctx.user_data['st']=ST_LN
