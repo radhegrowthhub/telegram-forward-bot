@@ -364,29 +364,74 @@ def is_media_blocked(ch:dict, mtype:str|None) -> bool:
 # ═══════════════════════════════════════════════════════════════
 def para_process(text:str, ch_id:int) -> str|None:
     """
-    para_block  → remove paragraph that contains trigger word
-    para (repl) → replace whole paragraph with new text
+    Para Block  → Jis LINE mein trigger word mile → sirf wo LINE delete
+    Para Replace→ Jis LINE mein trigger word mile → puri LINE replace ho
+    
+    Split logic:
+    - Pehle double-newline se split karo (sections)
+    - Phir har section ko single-newline se bhi check karo (lines)
+    - Dono levels pe block/replace apply hota hai
     Returns None if entire message should be dropped.
     """
     if not text: return text
-    paragraphs=re.split(r'\n{2,}',text)
-    para_blocks=f_get_type(ch_id,'para_block')
-    para_repls=rp_get(ch_id,'para')
+    para_blocks = f_get_type(ch_id,'para_block')
+    para_repls  = rp_get(ch_id,'para')
     if not para_blocks and not para_repls: return text
-    result=[]
-    for para in paragraphs:
-        pl=para.lower(); blocked=False; replaced=False
+
+    # ── Process line by line (single \n split) ──
+    # Each line is a separate unit that can be blocked/replaced independently
+    lines = text.split('\n')
+    result_lines = []
+
+    for line in lines:
+        ll = line.lower()
+        blocked = False
+        replaced = False
+
+        # Check para_block (supports spaced words like "C R I C K E T")
         for f in para_blocks:
-            if f['val'].lower() in pl: blocked=True; break
+            trigger = f['val'].strip()
+            if not trigger: continue
+            # Collapse spaces in trigger for flexible matching
+            t_clean = ''.join(trigger.split()).lower()
+            # Build flexible regex: C\s*R\s*I\s*C\s*K\s*E\s*T
+            import re as _re2
+            try:
+                spaced_pat = r'\s*'.join(_re2.escape(c) for c in t_clean)
+                if _re2.search(spaced_pat, ll, flags=_re2.IGNORECASE):
+                    blocked = True; break
+            except: 
+                if t_clean in ll: blocked = True; break
         if blocked: continue
+
+        # Check para_replace (supports spaced words too)
         for r in para_repls:
-            if r['old_val'].lower() in pl:
-                nv=r['new_val']
-                if nv and nv!='-': result.append(nv)
-                replaced=True; break
-        if not replaced: result.append(para)
-    if not result: return None
-    return "\n\n".join(result)
+            trigger = r['old_val'].strip()
+            if not trigger: continue
+            t_clean = ''.join(trigger.split()).lower()
+            import re as _re3
+            matched = False
+            try:
+                spaced_pat = r'\s*'.join(_re3.escape(c) for c in t_clean)
+                if _re3.search(spaced_pat, ll, flags=_re3.IGNORECASE):
+                    matched = True
+            except:
+                if t_clean in ll: matched = True
+            if matched:
+                nv = r['new_val']
+                if nv and nv != '-': result_lines.append(nv)
+                replaced = True; break
+
+        if not replaced:
+            result_lines.append(line)
+
+    if not result_lines:
+        return None   # all lines blocked → drop whole message
+
+    # Remove leading/trailing blank lines but keep internal spacing
+    result = '\n'.join(result_lines)
+    result = result.strip('\n')
+    return result if result.strip() else None
 
 # ═══════════════════════════════════════════════════════════════
 #   CHAT CACHE
@@ -612,12 +657,203 @@ def strip_links(text,b_all,b_www,b_tme,b_at):
     return text.strip()
 
 # ═══════════════════════════════════════════════════════════════
+#   SMART REPLACE — handles spaced words like "C R I C K E T"
+# ═══════════════════════════════════════════════════════════════
+def _normalize(text: str) -> str:
+    """
+    Collapse ALL kinds of spacing between individual characters.
+    Handles:
+      "C R I C K E T"          → "CRICKET"
+      "C  R  I  C  K  E  T"    → "CRICKET"
+      "M A L I K   B H A I"    → "MALIK BHAI"  (multi-word spaced)
+    Logic: if EVERY character is separated by 1-3 spaces → collapse.
+    """
+    # Replace multiple spaces/tabs with single space first
+    t = re.sub(r'[ 	]+', ' ', text)
+    # Collapse spaced-letter pattern: single letters separated by spaces
+    # "C R I C K E T" → each token is 1 char → collapse the spaces
+    # We do this word-by-word on each "run" of spaced single chars
+    def collapse_spaced_run(m):
+        chars = m.group(0).split()
+        return ''.join(chars)
+    # Match runs of: single-char SPACE single-char SPACE ... (3+ chars total)
+    t = re.sub(r'(?<!\S)(?:[A-Za-z0-9] ){2,}[A-Za-z0-9](?!\S)', collapse_spaced_run, t)
+    return t
+
+def smart_replace(text: str, old_val: str, new_val: str) -> str:
+    """
+    Replace old_val in text, matching even when letters are spaced out.
+    
+    Examples:
+      old_val="CRICKET", text has "C R I C K E T"  → replaced
+      old_val="C R I C K E T", text has "CRICKET"  → replaced
+      old_val="Malik Bhai", text has "M A L I K   B H A I" → replaced
+    """
+    if not text or not old_val: return text
+
+    # 1. Direct replacement (exact match, case-insensitive)
+    result = re.sub(re.escape(old_val), new_val, text, flags=re.IGNORECASE)
+    if result != text:
+        return result
+
+    # 2. Normalize the OLD value (remove internal spaces between single chars)
+    old_norm = _normalize(old_val).strip()
+
+    # 3. Build a regex that matches the old value with ANY spacing between chars
+    #    "CRICKET" → matches "C R I C K E T", "CRICKET", "C  R  I  C  K  E  T"
+    #    "Malik Bhai" → matches "M A L I K   B H A I", "M A L I K B H A I"
+    def build_spaced_pattern(word: str) -> str:
+        """Build regex matching word with optional spaces between each char."""
+        # Allow 0-3 spaces between every character
+        return r'[ 	]{0,3}'.join(re.escape(c) for c in word)
+
+    # Handle multi-word old_val: "Malik Bhai" → match "M A L I K B H A I" too
+    # Split by whitespace, build pattern for each word, join with flexible space
+    words = old_norm.split()
+    if not words: return text
+
+    # Pattern: each word's chars separated by optional spaces, words by flexible spaces
+    word_patterns = [build_spaced_pattern(w) for w in words]
+    full_pattern = r'[ 	]{0,5}'.join(word_patterns)
+
+    try:
+        result = re.sub(full_pattern, new_val, text, flags=re.IGNORECASE)
+    except re.error:
+        result = text  # fallback: return unchanged if regex error
+
+    return result
+
+# ═══════════════════════════════════════════════════════════════
 #   ENGINE
 # ═══════════════════════════════════════════════════════════════
 ACL:dict={}; TSK:dict={}; REPLY_MAP:dict={}
 
 # Menu message tracker — last bot menu msg per user {uid: Message}
 MENU_MSG:dict={}
+
+def _collapse_spaces(text: str) -> str:
+    """
+    Remove ALL extra spaces/tabs between characters so spaced text becomes normal.
+    Examples:
+      "C R I C K E T"  →  "CRICKET"
+      "M A L I K"      →  "MALIK"
+      "hello   world"  →  "hello world"  (multi-space → single space, preserved between words)
+    Strategy:
+      - If a word is entirely single-char separated by spaces → collapse to one word
+      - Otherwise keep normal word spacing
+    """
+    # Split on newlines first to process each line independently
+    lines = text.split('\n')
+    result = []
+    for line in lines:
+        result.append(_collapse_line_spaces(line))
+    return '\n'.join(result)
+
+def _collapse_line_spaces(line: str) -> str:
+    """Collapse spaced-out single characters in a line."""
+    if not line.strip():
+        return line
+    # Pattern: single chars separated by spaces (like "C R I C K E T")
+    # We do this iteratively — find runs of (single-char SPACE)+ single-char
+    # and collapse them
+    import re as _re
+    # Match sequences like "C R I C K E T" (at least 3 chars spaced out)
+    def collapse_run(m):
+        # Remove all spaces within the matched run
+        return m.group(0).replace(' ', '')
+
+    # Regex: a single non-space char, followed by (space + single non-space char) repeated 2+ times
+    # This catches "C R I C K E T" but NOT "hello world" (multi-char words)
+    collapsed = _re.sub(
+        r'(?<![\S])([\S]) (([\S]) ){2,}[\S](?![\S])|^([\S]) (([\S]) ){2,}[\S]$|([\S]) (([\S]) ){2,}[\S](?=\s|$)',
+        lambda m: m.group(0).replace(' ', ''),
+        line
+    )
+    # Simpler fallback: also try token-by-token approach
+    # Split the line into tokens. If all tokens in a run are single chars → they form one word.
+    # This is more reliable:
+    tokens = line.split(' ')
+    i = 0
+    out_tokens = []
+    while i < len(tokens):
+        tok = tokens[i]
+        if len(tok) == 1 and tok.strip():
+            # Start of a possible spaced-word run
+            run = [tok]
+            j = i + 1
+            while j < len(tokens) and len(tokens[j]) == 1 and tokens[j].strip():
+                run.append(tokens[j])
+                j += 1
+            if len(run) >= 2:
+                # Collapse the run into one word
+                out_tokens.append(''.join(run))
+                i = j
+                continue
+        out_tokens.append(tok)
+        i += 1
+    return ' '.join(out_tokens)
+
+def smart_replace(text: str, old_val: str, new_val: str) -> str:
+    """
+    Replace old_val with new_val in text.
+    Handles ALL these cases:
+    1. Normal:  "CRICKET" trigger matches "CRICKET" in text         ✅
+    2. Spaced:  "CRICKET" trigger matches "C R I C K E T" in text  ✅
+    3. Spaced trigger: "C R I C K E T" trigger also works          ✅
+    4. Case-insensitive matching                                    ✅
+    5. Preserves rest of text exactly                               ✅
+    """
+    if not text or not old_val: return text
+
+    # Normalize the search pattern — collapse spaces in trigger too
+    # So user can type "CRICKET" or "C R I C K E T" as trigger — both work
+    old_clean = ''.join(old_val.split())   # "C R I C K E T" → "CRICKET"
+    old_lower  = old_clean.lower()
+
+    # Process line by line to preserve newlines
+    lines = text.split('\n')
+    result_lines = []
+
+    for line in lines:
+        result_lines.append(_replace_in_line(line, old_val, old_clean, old_lower, new_val))
+
+    return '\n'.join(result_lines)
+
+def _replace_in_line(line: str, old_val: str, old_clean: str, old_lower: str, new_val: str) -> str:
+    """Try all replacement strategies on a single line."""
+    # ── Strategy 1: Direct substring match (original behavior) ──
+    if old_val in line:
+        return line.replace(old_val, new_val)
+
+    # Case-insensitive direct match
+    if old_val.lower() in line.lower():
+        import re as _re
+        return _re.sub(_re.escape(old_val), new_val, line, flags=_re.IGNORECASE)
+
+    # ── Strategy 2: Collapse spaced chars in LINE, then match ──
+    # Build a regex that matches old_clean with optional spaces between each char
+    # "CRICKET" → pattern "C\s*R\s*I\s*C\s*K\s*E\s*T"
+    import re as _re
+
+    # Build flexible pattern: each char of old_clean may have 0+ spaces around it
+    # This matches "CRICKET", "C R I C K E T", "C  R  I  C  K  E  T", etc.
+    spaced_pattern = r'\s*'.join(_re.escape(c) for c in old_clean)
+
+    try:
+        match = _re.search(spaced_pattern, line, flags=_re.IGNORECASE)
+        if match:
+            return line[:match.start()] + new_val + line[match.end():]
+    except _re.error:
+        pass
+
+    # ── Strategy 3: Also try with old_val having spaces collapsed ──
+    if old_clean != old_val.replace(' ',''):
+        # old_val had spaces — try matching clean version in line
+        if old_clean.lower() in line.lower():
+            return _re.sub(_re.escape(old_clean), new_val, line, flags=_re.IGNORECASE)
+
+    return line   # no match found — return unchanged
+
 
 async def _fwd(cl,msg,did,ch,repls,reply_to_msg_id=None):
     try:
@@ -630,8 +866,10 @@ async def _fwd(cl,msg,did,ch,repls,reply_to_msg_id=None):
         raw = msg.raw_text or ""
 
         # ── Check if we need to transform text at all ──
+        # Also check flt table for para_block rules (separate from repls)
+        _para_blk = f_get_type(ch['id'], 'para_block')
         needs_transform = bool(
-            repls or
+            repls or _para_blk or
             ch.get('block_all_links') or ch.get('block_links') or
             ch.get('block_www') or ch.get('block_tme') or ch.get('block_at') or
             (ch.get('free_style') and ch.get('free_style') != 'none') or
@@ -642,8 +880,10 @@ async def _fwd(cl,msg,did,ch,repls,reply_to_msg_id=None):
         )
 
         # ── Word/link replacements ──
+        # Also handles spaced-out words: "C R I C K E T" matches "CRICKET" trigger
         for r in repls:
-            if r['rtype'] in ('link','word'): raw=raw.replace(r['old_val'],r['new_val'])
+            if r['rtype'] in ('link','word'):
+                raw = smart_replace(raw, r['old_val'], r['new_val'])
 
         # ── Link blocking ──
         b_all=bool(ch.get('block_all_links') or ch.get('block_links'))
@@ -1075,8 +1315,8 @@ def KB_FLT(cid):
     rows.append([B("─── 🚫 BLACKLIST (Skip IF contains) ───","noop")])
     for f in bl: rows.append([B(f"🚫 {f['val'][:30]}","noop"),B("🗑",f"d_flt_{f['id']}")])
     rows.append([B("➕ Add Blacklist",f"add_bl_{cid}")])
-    rows.append([B("─── 📝 PARA BLOCK (Remove paragraph) ───","noop")])
-    rows.append([B("💡 Word milne pe sirf WO paragraph delete","noop")])
+    rows.append([B("─── 📝 PARA BLOCK (Line delete) ───","noop")])
+    rows.append([B("💡 Word jis LINE mein mile → sirf wo line delete","noop")])
     for f in pbl: rows.append([B(f"📝 {f['val'][:30]}","noop"),B("🗑",f"d_flt_{f['id']}")])
     rows.append([B("➕ Add Para Block",f"add_pb_{cid}")])
     rows.append([B("‹ Back",f"ch_{cid}"),B("🏠 Home","main")])
@@ -1093,7 +1333,7 @@ def KB_REPLS(cid):
     for r in wrp: rows.append([B(f"📝 {r['old_val'][:18]}→{r['new_val'][:12]}","noop"),B("🗑",f"d_rp_{r['id']}")])
     rows.append([B("➕ Add Word Replace",f"add_wrp_{cid}")])
     rows.append([B(f"📋 Para Replace ({len(prp)})","noop")])
-    rows.append([B("💡 Para mein word mile → pura para replace","noop")])
+    rows.append([B("💡 Word jis LINE mein mile → puri line replace/delete","noop")])
     for r in prp:
         nv="[DELETE]" if (not r['new_val'] or r['new_val']=='-') else r['new_val'][:15]
         rows.append([B(f"📋 '{r['old_val'][:12]}' → {nv}","noop"),B("🗑",f"d_rp_{r['id']}")])
@@ -1687,7 +1927,11 @@ async def cbk(update:Update,ctx):
     elif d.startswith("add_prp_"):
         cid=int(d[8:]); TEMP[uid]={'cid':cid}; ctx.user_data['st']=ST_PRO
         await _safe_delete(MENU_MSG.pop(uid,None))
-        m=await q.message.reply_text("📋 Para Replace\n\nTrigger word bhejo:\n(Jis paragraph mein ye word ho)\n\n/cancel")
+        m=await q.message.reply_text(
+            "📋 Para Replace — Line Replace\n\n"
+            "Step 1: Trigger word bhejo:\n"
+            "(Jis LINE mein ye word hoga → puri line replace hogi)\n\n"
+            "Example: 'join us' ya 'click here'\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("d_rp_"): rp_del(int(d[5:])); await ANS("✅ Removed!")
 
@@ -1703,7 +1947,11 @@ async def cbk(update:Update,ctx):
         cid=int(d[7:]); TEMP[uid]={'cid':cid,'ft':'para_block'}; ctx.user_data['st']=ST_PB
         await _safe_delete(MENU_MSG.pop(uid,None))
         m=await q.message.reply_text(
-            "📝 Para Block\n\nTrigger word bhejo:\nJis paragraph mein ye word hoga wo DELETE ho jaayega.\n\n/cancel")
+            "📝 Para Block — Line Delete\n\n"
+            "Trigger word bhejo:\n"
+            "Jis LINE mein ye word hoga → sirf wo LINE delete hogi\n"
+            "(Baki sab lines safe rahenge)\n\n"
+            "Example: 'advertisement' ya 't.me' ya 'click here'\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
     elif d.startswith("d_flt_"): f_del(int(d[6:])); await ANS("✅ Removed!")
 
@@ -1847,7 +2095,11 @@ async def msg_hdl(update:Update,ctx):
         TEMP.setdefault(uid,{})['old']=txt; ctx.user_data['st']=ST_PRN
         await _dp(); await _du()
         m=await update.message.reply_text(
-            f"📋 Para Replace — Step 2\n\nTrigger: `{txt}`\n\nAb replacement text bhejo:\n('-' = paragraph delete karo)\n\n/cancel")
+            f"📋 Para Replace — Step 2\n\n"
+            f"Trigger word: `{txt}`\n\n"
+            f"Ab replacement text bhejo:\n"
+            f"(Ye puri LINE is text se replace hogi)\n"
+            f"('-' type karo agar line sirf DELETE karni ho)\n\n/cancel")
         TEMP[uid]['prompt_id']=m.message_id
     elif st==ST_PRN:
         cid=_cid(); old=TEMP.get(uid,{}).get('old',''); rp_add(cid,uid,'para',old,txt)
